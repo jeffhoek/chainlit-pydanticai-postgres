@@ -1,0 +1,189 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - docs/**
+      - '*.md'
+
+pr: none
+
+variables:
+  acrName: acrchainlitragdev
+  acrLoginServer: acrchainlitragdev.azurecr.io
+  imageRepository: chainlit-pydanticai-rag
+  resourceGroup: rg-chainlit-rag-dev
+  appServiceName: app-chainlit-rag-dev
+  azureServiceConnection: azure-chainlit-rag
+  githubServiceConnection: github-chainlit-rag
+  PIPELINE_SP_OBJECT_ID: "$(PIPELINE_SP_OBJECT_ID)"
+
+stages:
+  # ─────────────────────────────────────────────────────────────
+  # Stage 1: Build and push container image to ACR
+  # ─────────────────────────────────────────────────────────────
+  - stage: Build
+    displayName: Build and push image
+    jobs:
+      - job: BuildAndPush
+        displayName: Docker build and push
+        pool:
+          name: Default
+        steps:
+          - checkout: self
+            displayName: Checkout source
+
+          - task: AzureCLI@2
+            displayName: Build and push to ACR
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                IMAGE_TAG=$(Build.SourceVersion)
+                SHORT_TAG=${IMAGE_TAG:0:7}
+
+                echo "##vso[task.setvariable variable=imageTag;isOutput=true]$SHORT_TAG"
+
+                az acr login --name $(acrName)
+
+                docker build \
+                  --platform linux/amd64 \
+                  --tag $(acrLoginServer)/$(imageRepository):$SHORT_TAG \
+                  --tag $(acrLoginServer)/$(imageRepository):latest \
+                  .
+
+                docker push $(acrLoginServer)/$(imageRepository):$SHORT_TAG
+                docker push $(acrLoginServer)/$(imageRepository):latest
+
+                echo "Pushed $(acrLoginServer)/$(imageRepository):$SHORT_TAG"
+            name: buildOutput
+
+  # ─────────────────────────────────────────────────────────────
+  # Stage 2: Deploy infrastructure via Bicep
+  # ─────────────────────────────────────────────────────────────
+  - stage: DeployInfra
+    displayName: Deploy infrastructure
+    dependsOn: Build
+    jobs:
+      - deployment: DeployBicep
+        displayName: Bicep what-if and deploy
+        pool:
+          name: Default
+        environment: chainlit-rag-dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  displayName: Checkout source
+
+                - task: AzureCLI@2
+                  displayName: Upgrade Bicep CLI
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: az bicep upgrade
+
+                - task: AzureCLI@2
+                  displayName: Bicep what-if (dry run)
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az deployment group what-if \
+                        --resource-group $(resourceGroup) \
+                        --template-file infra/main.bicep \
+                        --parameters infra/parameters.dev.bicepparam \
+                        --parameters pipelineServicePrincipalObjectId=$(PIPELINE_SP_OBJECT_ID)
+
+                - task: AzureCLI@2
+                  displayName: Bicep deploy (incremental)
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az deployment group create \
+                        --resource-group $(resourceGroup) \
+                        --template-file infra/main.bicep \
+                        --parameters infra/parameters.dev.bicepparam \
+                        --parameters pipelineServicePrincipalObjectId=$(PIPELINE_SP_OBJECT_ID) \
+                        --mode Incremental
+
+  # ─────────────────────────────────────────────────────────────
+  # Stage 3: Deploy app (update container image + health check)
+  # ─────────────────────────────────────────────────────────────
+  - stage: DeployApp
+    displayName: Deploy application
+    dependsOn:
+      - Build
+      - DeployInfra
+    variables:
+      imageTag: $[ stageDependencies.Build.BuildAndPush.outputs['buildOutput.imageTag'] ]
+    jobs:
+      - deployment: DeployContainer
+        displayName: Update container and verify
+        pool:
+          name: Default
+        environment: chainlit-rag-dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: Update App Service container image
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+
+                      az webapp config container set \
+                        --name $(appServiceName) \
+                        --resource-group $(resourceGroup) \
+                        --docker-custom-image-name $(acrLoginServer)/$(imageRepository):$(imageTag)
+
+                      az webapp restart \
+                        --name $(appServiceName) \
+                        --resource-group $(resourceGroup)
+
+                      echo "Deployed $(acrLoginServer)/$(imageRepository):$(imageTag)"
+
+                - task: AzureCLI@2
+                  displayName: Health check (poll /healthz for 240s)
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+
+                      HEALTH_URL="https://$(appServiceName).azurewebsites.net/healthz"
+                      MAX_WAIT=240
+                      INTERVAL=15
+                      ELAPSED=0
+
+                      echo "Polling $HEALTH_URL (max ${MAX_WAIT}s, every ${INTERVAL}s)"
+
+                      while [ $ELAPSED -lt $MAX_WAIT ]; do
+                        STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" || echo "000")
+
+                        if [ "$STATUS" = "200" ]; then
+                          echo "Health check passed after ${ELAPSED}s (HTTP $STATUS)"
+                          exit 0
+                        fi
+
+                        echo "  ${ELAPSED}s — HTTP $STATUS, retrying in ${INTERVAL}s..."
+                        sleep $INTERVAL
+                        ELAPSED=$((ELAPSED + INTERVAL))
+                      done
+
+                      echo "Health check timed out after ${MAX_WAIT}s"
+                      exit 1

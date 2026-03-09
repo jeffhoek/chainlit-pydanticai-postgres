@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chainlit-rag
+  namespace: rag
+  annotations:
+    # Internet-facing ALB with IP target type (routes directly to pod IPs)
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    # 600s idle timeout exceeds Chainlit's WebSocket keep-alive to prevent mid-chat disconnects
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=600
+    # 24-hour sticky sessions ensure each browser always routes to the same pod (WebSocket state)
+    alb.ingress.kubernetes.io/target-group-attributes: >-
+      stickiness.enabled=true,stickiness.type=lb_cookie,stickiness.lb_cookie.duration_seconds=86400
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: chainlit-rag
+                port:
+                  number: 80

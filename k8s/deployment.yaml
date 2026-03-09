@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chainlit-rag
+  namespace: rag
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chainlit-rag
+  template:
+    metadata:
+      labels:
+        app: chainlit-rag
+    spec:
+      serviceAccountName: chainlit-rag
+      containers:
+        - name: chainlit-rag
+          # Updated by CI/CD: kubectl set image deployment/chainlit-rag chainlit-rag=<ecr-image>:<sha>
+          image: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-2.amazonaws.com/chainlit-pydanticai-rag:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: rag-config
+            - secretRef:
+                name: rag-secrets
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          # startupProbe gives the pod up to 30s to start (DB connection only, no data loading)
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 10
+          # readinessProbe runs after startupProbe succeeds
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # livenessProbe restarts the pod if the app becomes unresponsive
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20

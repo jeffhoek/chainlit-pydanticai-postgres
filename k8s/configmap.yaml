@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-config
+  namespace: rag
+data:
+  APP_USERNAME: "admin"
+  LLM_MODEL: "anthropic:claude-haiku-4-5-20251001"
+  TOP_K: "5"
+  SYSTEM_PROMPT: "You are a helpful assistant. Use the retrieve tool to find relevant context before answering questions. Answer the user's question helpfully and concisely based on the retrieved context. If the answer is not in the context, say you don't have that information."
+  # Action Buttons (optional — JSON array of quick-query button labels)
+  # ACTION_BUTTONS: '["What vulnerabilities affect Apache?","Show recent KEV entries","What ransomware campaigns are tracked?"]'
+  PG_HOST: "your-tigerdata-endpoint.tsdb.cloud.timescale.com"
+  PG_PORT: "5432"
+  PG_DATABASE: "inventory"
