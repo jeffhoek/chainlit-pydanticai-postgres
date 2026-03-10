@@ -92,19 +92,9 @@ In **Azure DevOps** → **Pipelines** → **New pipeline** → **GitHub** → se
 
 ### 2.3 Add the pipeline service principal Object ID to the pipeline
 
-Saving the ARM service connection creates an **Enterprise Application** in Entra ID. Get its Object ID (different from the App Registration's Object ID).
+Saving the ARM service connection creates an **Enterprise Application** in Entra ID. You need its Object ID — this is different from the App Registration's Object ID shown in the Azure DevOps service connection details.
 
-Azure DevOps auto-generates a display name for the service principal (e.g. `org-project-<guid>`) that does not match the service connection name, so searching by display name is unreliable. Instead, get the **App (client) ID** first:
-
-In **Azure DevOps** → **Project Settings** → **Service connections** → `azure-chainlit-rag` → **⋮** menu → **Manage Service Principal** → copy the **Application (client) ID**.
-
-Then fetch the Object ID via CLI:
-
-```bash
-az ad sp show --id <app-id-from-service-connection> --query id -o tsv
-```
-
-Or stay in the Portal: the **Manage Service Principal** link above takes you directly to the Enterprise Application — copy the **Object ID** from there.
+In **Azure Portal** → **Microsoft Entra ID** → **Enterprise applications** → search for the auto-generated name matching your org and project (e.g. `jeffreyscotthoekman0908-chainlit-pg-<guid>`) → **Overview** → copy the **Object ID**.
 
 Set it as a pipeline UI variable (no YAML edit needed):
 
