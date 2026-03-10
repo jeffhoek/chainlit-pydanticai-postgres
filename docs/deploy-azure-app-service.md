@@ -248,7 +248,7 @@ psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
 Schema creation runs automatically on app startup. To run manually:
 ```bash
-uv run python -c "from rag.database import create_schema; import asyncio; asyncio.run(create_schema())"
+uv run python -c "from rag.database import init_db; import asyncio; asyncio.run(init_db())"
 ```
 
 ### 5.2 Load CISA KEV data (~1,500 records)
