@@ -86,7 +86,11 @@ In **Azure DevOps** → your project → **Project Settings** → **Pipelines** 
 
 > If the resource group dropdown shows "Loading..." indefinitely, complete step 2.0 first.
 
-### 2.2 Add the pipeline service principal Object ID to the pipeline
+### 2.2 Create the Pipeline
+
+In **Azure DevOps** → **Pipelines** → **New pipeline** → **GitHub** → select `chainlit-pydanticai-rag` → **Existing Azure Pipelines YAML file** → branch `main`, path `/azure-pipelines.yml` → **Continue** → **Save** (do not run yet).
+
+### 2.3 Add the pipeline service principal Object ID to the pipeline
 
 Saving the ARM service connection creates an **Enterprise Application** in Entra ID. Get its Object ID (different from the App Registration's Object ID).
 
@@ -105,10 +109,6 @@ Or stay in the Portal: the **Manage Service Principal** link above takes you dir
 Set it as a pipeline UI variable (no YAML edit needed):
 
 In **Azure DevOps** → **Pipelines** → select the pipeline → **Edit** → **Variables** (top-right) → **New variable** → name: `PIPELINE_SP_OBJECT_ID`, value: `<object-id>`, uncheck **Keep this value secret** → **Save**.
-
-### 2.3 Create the Pipeline
-
-In **Azure DevOps** → **Pipelines** → **New pipeline** → **GitHub** → select `chainlit-pydanticai-rag` → **Existing Azure Pipelines YAML file** → branch `main`, path `/azure-pipelines.yml` → **Continue** → **Save** (do not run yet).
 
 ### 2.4 Create the Deployment Environment
 
