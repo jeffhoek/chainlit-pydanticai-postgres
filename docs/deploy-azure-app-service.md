@@ -88,20 +88,23 @@ In **Azure DevOps** → your project → **Project Settings** → **Pipelines** 
 
 ### 2.2 Add the pipeline service principal Object ID to the pipeline
 
-Saving the ARM service connection creates an **Enterprise Application** in Entra ID. Get its Object ID (different from the App Registration's Object ID):
+Saving the ARM service connection creates an **Enterprise Application** in Entra ID. Get its Object ID (different from the App Registration's Object ID).
+
+Azure DevOps auto-generates a display name for the service principal (e.g. `org-project-<guid>`) that does not match the service connection name, so searching by display name is unreliable. Instead, get the **App (client) ID** first:
+
+In **Azure DevOps** → **Project Settings** → **Service connections** → `azure-chainlit-rag` → **⋮** menu → **Manage Service Principal** → copy the **Application (client) ID**.
+
+Then fetch the Object ID via CLI:
 
 ```bash
-az ad sp list --display-name "azure-chainlit-rag" --query "[0].id" -o tsv
+az ad sp show --id <app-id-from-service-connection> --query id -o tsv
 ```
 
-Or in **Azure Portal** → **Microsoft Entra ID** → **Enterprise applications** → search `azure-chainlit-rag` → copy **Object ID**.
+Or stay in the Portal: the **Manage Service Principal** link above takes you directly to the Enterprise Application — copy the **Object ID** from there.
 
-In `azure-pipelines.yml`, add or update the `variables:` block (safe to commit):
+Set it as a pipeline UI variable (no YAML edit needed):
 
-```yaml
-variables:
-  PIPELINE_SP_OBJECT_ID: '<paste-your-object-id-here>'
-```
+In **Azure DevOps** → **Pipelines** → select the pipeline → **Edit** → **Variables** (top-right) → **New variable** → name: `PIPELINE_SP_OBJECT_ID`, value: `<object-id>`, uncheck **Keep this value secret** → **Save**.
 
 ### 2.3 Create the Pipeline
 
