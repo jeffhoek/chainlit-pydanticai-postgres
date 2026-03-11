@@ -248,9 +248,11 @@ async def main() -> None:
     rate_info = "with API key (50 req/30s)" if NVD_API_KEY else "without API key (5 req/30s)"
     print(f"  Rate limiting: {rate_info}")
 
-    # Connect to database
+    # Connect to database for initial setup and ID queries, then close.
+    # Connection is reopened per batch to avoid idle timeout on long fetches.
     print("Connecting to PostgreSQL...")
-    conn = await asyncpg.connect(dsn=settings.get_database_dsn())
+    dsn = settings.get_database_dsn()
+    conn = await asyncpg.connect(dsn=dsn)
     from rag.database import SCHEMA_SQL
     await conn.execute(SCHEMA_SQL)
     await register_vector(conn)
@@ -268,13 +270,14 @@ async def main() -> None:
     existing_ids = {row["cve_id"] for row in existing}
     new_ids = [cve_id for cve_id in cve_ids if cve_id not in existing_ids]
     print(f"  {len(existing_ids)} already loaded, {len(new_ids)} new to fetch")
+    await conn.close()
 
     if not new_ids:
         print("All NVD records already loaded. Nothing to do.")
-        await conn.close()
         return
 
-    # Process in batches: fetch → embed → upsert, then move to next batch
+    # Process in batches: fetch → embed → upsert, then move to next batch.
+    # A fresh DB connection is opened for each upsert to avoid idle timeout.
     print(f"Fetching {len(new_ids)} CVEs from NVD API (batch size: {BATCH_SIZE})...")
     openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
     total_loaded = 0
@@ -299,11 +302,13 @@ async def main() -> None:
             embeddings = await generate_embeddings(openai_client, contents)
 
             print(f"  Upserting {len(cve_records)} records...")
+            conn = await asyncpg.connect(dsn=dsn)
+            await register_vector(conn)
             await upsert_records(conn, cve_records, embeddings)
+            await conn.close()
             total_loaded += len(cve_records)
             print(f"  Batch {batch_num} complete. Total loaded so far: {total_loaded}")
 
-    await conn.close()
     print(f"Done! Loaded {total_loaded} NVD records ({total_skipped} skipped).")
 
 
