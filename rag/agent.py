@@ -1,6 +1,8 @@
+import logging
 import re
 from dataclasses import dataclass
 
+import asyncpg
 from openai import AsyncOpenAI
 from pydantic_ai import Agent, RunContext
 
@@ -48,8 +50,11 @@ async def query(ctx: RunContext[Deps], sql: str) -> str:
     try:
         async with ctx.deps.vector_store.pool.acquire() as conn:
             rows = await conn.fetch(sql)
-    except Exception as e:
+    except asyncpg.PostgresError as e:
         return f"Query error: {e}"
+    except Exception:
+        logging.exception("Unexpected error in query tool")
+        return "Internal error executing query."
 
     if not rows:
         return "No results found."
