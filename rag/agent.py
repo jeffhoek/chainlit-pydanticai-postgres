@@ -1,5 +1,8 @@
+import logging
+import re
 from dataclasses import dataclass
 
+import asyncpg
 from openai import AsyncOpenAI
 from pydantic_ai import Agent, RunContext
 
@@ -19,6 +22,50 @@ rag_agent = Agent(
     deps_type=Deps,
     system_prompt=settings.system_prompt,
 )
+
+
+MAX_QUERY_ROWS = 100
+
+
+@rag_agent.tool
+async def query(ctx: RunContext[Deps], sql: str) -> str:
+    """Execute a read-only SQL SELECT query against the database.
+
+    Args:
+        sql: A SELECT statement to run against the database.
+
+    Returns:
+        Query results as a formatted table, or an error message.
+    """
+    if not sql.strip().upper().startswith("SELECT"):
+        return "Error: Only SELECT statements are permitted."
+
+    limit_match = re.search(r'\bLIMIT\s+(\d+)\b', sql, re.IGNORECASE)
+    if limit_match:
+        if int(limit_match.group(1)) > MAX_QUERY_ROWS:
+            sql = sql[:limit_match.start(1)] + str(MAX_QUERY_ROWS) + sql[limit_match.end(1):]
+    else:
+        sql = sql.rstrip().rstrip(';') + f" LIMIT {MAX_QUERY_ROWS}"
+
+    try:
+        async with ctx.deps.vector_store.pool.acquire() as conn:
+            rows = await conn.fetch(sql)
+    except asyncpg.PostgresError as e:
+        return f"Query error: {e}"
+    except Exception:
+        logging.exception("Unexpected error in query tool")
+        return "Internal error executing query."
+
+    if not rows:
+        return "No results found."
+
+    headers = list(rows[0].keys())
+    lines = [" | ".join(headers)]
+    lines.append("-" * len(lines[0]))
+    for row in rows:
+        lines.append(" | ".join(str(v) for v in row.values()))
+    lines.append(f"\n{len(rows)} row(s) returned.")
+    return "\n".join(lines)
 
 
 @rag_agent.tool
