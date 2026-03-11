@@ -146,40 +146,39 @@ async def fetch_nvd_cve(client: httpx.AsyncClient, cve_id: str) -> dict | None:
     return vulns[0].get("cve")
 
 
-async def fetch_all_nvd(cve_ids: list[str]) -> list[dict]:
-    """Fetch NVD data for all CVE IDs with rate limiting."""
+async def fetch_nvd_batch(client: httpx.AsyncClient, cve_ids: list[str], offset: int, total: int) -> tuple[list[dict], int]:
+    """Fetch a batch of CVEs from the NVD API. Returns (records, skipped)."""
     results = []
     skipped = 0
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        for i, cve_id in enumerate(cve_ids):
-            try:
+    for i, cve_id in enumerate(cve_ids):
+        try:
+            cve_data = await fetch_nvd_cve(client, cve_id)
+            if cve_data:
+                results.append(cve_data)
+            else:
+                skipped += 1
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                print(f"  Rate limited at {cve_id}, waiting 30s...")
+                await asyncio.sleep(30)
                 cve_data = await fetch_nvd_cve(client, cve_id)
                 if cve_data:
                     results.append(cve_data)
-                else:
-                    skipped += 1
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 403:
-                    print(f"  Rate limited at {cve_id}, waiting 30s...")
-                    await asyncio.sleep(30)
-                    cve_data = await fetch_nvd_cve(client, cve_id)
-                    if cve_data:
-                        results.append(cve_data)
-                else:
-                    print(f"  Error fetching {cve_id}: {e}")
-                    skipped += 1
-            except Exception as e:
+            else:
                 print(f"  Error fetching {cve_id}: {e}")
                 skipped += 1
+        except Exception as e:
+            print(f"  Error fetching {cve_id}: {e}")
+            skipped += 1
 
-            if (i + 1) % 50 == 0:
-                print(f"  Fetched {i + 1}/{len(cve_ids)} ({len(results)} found, {skipped} skipped)")
+        absolute = offset + i + 1
+        if absolute % 50 == 0:
+            print(f"  Fetched {absolute}/{total}")
 
-            await asyncio.sleep(REQUEST_DELAY)
+        await asyncio.sleep(REQUEST_DELAY)
 
-    print(f"  Fetched {len(results)} NVD records ({skipped} skipped)")
-    return results
+    return results, skipped
 
 
 async def generate_embeddings(openai_client: AsyncOpenAI, texts: list[str]) -> list[list[float]]:
@@ -275,26 +274,37 @@ async def main() -> None:
         await conn.close()
         return
 
-    # Fetch NVD data
-    print(f"Fetching {len(new_ids)} CVEs from NVD API...")
-    cve_records = await fetch_all_nvd(new_ids)
-    if not cve_records:
-        print("No NVD records fetched. Exiting.")
-        await conn.close()
-        return
-
-    # Build content and generate embeddings
-    contents = [build_content(cve) for cve in cve_records]
-    print("Generating embeddings...")
+    # Process in batches: fetch → embed → upsert, then move to next batch
+    print(f"Fetching {len(new_ids)} CVEs from NVD API (batch size: {BATCH_SIZE})...")
     openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-    embeddings = await generate_embeddings(openai_client, contents)
+    total_loaded = 0
+    total_skipped = 0
 
-    # Upsert
-    print("Upserting records...")
-    await upsert_records(conn, cve_records, embeddings)
+    async with httpx.AsyncClient(timeout=30) as client:
+        for batch_start in range(0, len(new_ids), BATCH_SIZE):
+            batch_ids = new_ids[batch_start : batch_start + BATCH_SIZE]
+            batch_num = batch_start // BATCH_SIZE + 1
+            total_batches = (len(new_ids) + BATCH_SIZE - 1) // BATCH_SIZE
+            print(f"Batch {batch_num}/{total_batches}: fetching {len(batch_ids)} CVEs...")
+
+            cve_records, skipped = await fetch_nvd_batch(client, batch_ids, batch_start, len(new_ids))
+            total_skipped += skipped
+
+            if not cve_records:
+                print(f"  No records in batch {batch_num}, skipping embed/upsert.")
+                continue
+
+            contents = [build_content(cve) for cve in cve_records]
+            print(f"  Generating embeddings for {len(cve_records)} records...")
+            embeddings = await generate_embeddings(openai_client, contents)
+
+            print(f"  Upserting {len(cve_records)} records...")
+            await upsert_records(conn, cve_records, embeddings)
+            total_loaded += len(cve_records)
+            print(f"  Batch {batch_num} complete. Total loaded so far: {total_loaded}")
+
     await conn.close()
-
-    print(f"Done! Loaded {len(cve_records)} NVD records.")
+    print(f"Done! Loaded {total_loaded} NVD records ({total_skipped} skipped).")
 
 
 if __name__ == "__main__":
