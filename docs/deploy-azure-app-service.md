@@ -182,12 +182,12 @@ az role assignment create \
 
 Use the bash `for` loop with `read` shell built-in to securely enter the env vars:
 ```bash
-for var in ANTHROPIC_API_KEY OPENAI_API_KEY APP_PASSWORD CHAINLIT_AUTH_SECRET DATABASE_URL; do
+for var in ANTHROPIC_API_KEY OPENAI_API_KEY APP_PASSWORD CHAINLIT_AUTH_SECRET PG_DATABASE_URL; do
   echo "$var" && read -rs $var
 done
 ```
 
-> For `DATABASE_URL`, enter the full Timescale Cloud connection string:
+> For `PG_DATABASE_URL`, enter the full Timescale Cloud connection string:
 > `postgresql://user:password@hostname.tsdb.cloud.timescale.com:5432/dbname?sslmode=require`
 
 Create the Azure Key Vault secrets:
@@ -215,7 +215,7 @@ az keyvault secret set \
 az keyvault secret set \
   --vault-name kv-chainlit-rag-dev \
   --name database-url \
-  --value "$DATABASE_URL"
+  --value "$PG_DATABASE_URL"
 ```
 
 Restart the App Service to re-resolve the Key Vault references:
@@ -230,18 +230,18 @@ az webapp restart \
 
 ## Step 5: Load KEV and NVD Data (one-time)
 
-Data is loaded directly into Timescale Cloud from your local machine. Run these steps once after the database is reachable. Set `DATABASE_URL` in your `.env` pointing to Timescale Cloud before running.
+Data is loaded directly into Timescale Cloud from your local machine. Run these steps once after the database is reachable. Set `PG_DATABASE_URL` in your `.env` pointing to Timescale Cloud before running.
 
 ### 5.0 Verify pgvector is enabled on Timescale Cloud
 
 Connect to your Timescale Cloud instance and confirm:
 ```bash
-psql "$DATABASE_URL" -c "SELECT extname FROM pg_extension WHERE extname = 'vector';"
+psql "$PG_DATABASE_URL" -c "SELECT extname FROM pg_extension WHERE extname = 'vector';"
 ```
 
 If not present, enable it:
 ```bash
-psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql "$PG_DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
 ### 5.1 Create the schema
@@ -268,8 +268,8 @@ uv run python scripts/load_nvd.py
 ### 5.4 Verify record counts
 
 ```bash
-psql "$DATABASE_URL" -c "SELECT COUNT(*) FROM kev_vulnerabilities;"
-psql "$DATABASE_URL" -c "SELECT COUNT(*) FROM nvd_vulnerabilities;"
+psql "$PG_DATABASE_URL" -c "SELECT COUNT(*) FROM kev_vulnerabilities;"
+psql "$PG_DATABASE_URL" -c "SELECT COUNT(*) FROM nvd_vulnerabilities;"
 ```
 
 ---
@@ -374,7 +374,7 @@ uv run python scripts/load_nvd.py
 - The B2 plan has `alwaysOn: true`, so cold starts only happen after a restart or deploy
 
 **Database connection fails on startup**
-- Confirm `DATABASE_URL` KV secret is set and the reference resolved (`az webapp config appsettings list`)
+- Confirm `PG_DATABASE_URL` app setting is set and the KV reference resolved (`az webapp config appsettings list`)
 - Confirm the Timescale Cloud connection string includes `?sslmode=require`
 - Timescale Cloud requires SSL — connections without it will be refused
 - Check Timescale Cloud connection limits and allowed IP ranges if the app is blocked
