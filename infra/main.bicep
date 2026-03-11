@@ -12,12 +12,6 @@ param acrName string
 @description('Key Vault name (globally unique, 3-24 chars)')
 param keyVaultName string
 
-@description('Storage account name (globally unique, lowercase alphanumeric)')
-param storageAccountName string
-
-@description('Blob container name for RAG content')
-param blobContainerName string = 'rag-content'
-
 @description('App Service Plan SKU (B2 for dev, P1v3 for prod)')
 param appServicePlanSku string
 
@@ -64,18 +58,7 @@ module keyVault 'modules/key-vault.bicep' = {
   }
 }
 
-// Step 4: Storage Account + Blob Container
-module storage 'modules/storage.bicep' = {
-  name: 'storage'
-  params: {
-    location: location
-    storageAccountName: storageAccountName
-    blobContainerName: blobContainerName
-    tags: tags
-  }
-}
-
-// Step 5: App Service Plan + Web App
+// Step 4: App Service Plan + Web App
 module appService 'modules/app-service.bicep' = {
   name: 'appService'
   params: {
@@ -87,12 +70,11 @@ module appService 'modules/app-service.bicep' = {
     identityClientId: identity.outputs.clientId
     acrLoginServer: acr.outputs.loginServer
     keyVaultName: keyVaultName
-    storageAccountName: storageAccountName
     tags: tags
   }
 }
 
-// Step 6: RBAC — all role assignments (depends on all resources above)
+// Step 5: RBAC — all role assignments (depends on all resources above)
 module rbac 'modules/rbac.bicep' = {
   name: 'rbac'
   dependsOn: [
@@ -102,12 +84,11 @@ module rbac 'modules/rbac.bicep' = {
     managedIdentityPrincipalId: identity.outputs.principalId
     pipelinePrincipalId: pipelineServicePrincipalObjectId
     keyVaultId: keyVault.outputs.keyVaultId
-    storageAccountId: storage.outputs.storageAccountId
     acrId: acr.outputs.acrId
   }
 }
 
-// Step 7: Azure Policy assignments
+// Step 6: Azure Policy assignments
 module policy 'modules/policy.bicep' = {
   name: 'policy'
 }
@@ -115,4 +96,3 @@ module policy 'modules/policy.bicep' = {
 output appServiceUrl string = 'https://${appService.outputs.defaultHostName}'
 output acrLoginServer string = acr.outputs.loginServer
 output keyVaultUri string = keyVault.outputs.keyVaultUri
-output storageAccountName string = storage.outputs.storageAccountName

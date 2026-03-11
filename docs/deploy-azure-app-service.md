@@ -1,10 +1,10 @@
 # Deploying to Azure App Service
 
-This guide walks through deploying the RAG chatbot to Azure App Service as a Linux container, using Azure Container Registry for images, Azure Key Vault for secrets, and Azure Blob Storage for RAG content. CI/CD runs via Azure Pipelines with Workload Identity Federation — no static credentials.
+This guide walks through deploying the CISA KEV + NVD RAG chatbot to Azure App Service as a Linux container, using Azure Container Registry for images, Azure Key Vault for secrets, and Timescale Cloud (hosted pgvector) as the database. CI/CD runs via Azure Pipelines with Workload Identity Federation — no static credentials.
 
 Two requirements shape the infrastructure design:
 - **WebSocket support** (Chainlit) → ARR sticky sessions (`clientAffinityEnabled: true`)
-- **120s+ startup time** (blob load + embedding generation) → `WEBSITE_CONTAINER_START_TIME_LIMIT: 230`
+- **120s+ startup time** (pgvector schema init) → `WEBSITE_CONTAINER_START_TIME_LIMIT: 230`
 
 ---
 
@@ -15,8 +15,8 @@ GitHub (source) → Azure Pipelines → ACR (images)
                                         ↓
                               App Service (Linux container)
                                 ↓              ↓
-                           Key Vault      Blob Storage
-                                ↑              ↑
+                           Key Vault    Timescale Cloud
+                                ↑         (pgvector)
                      User-Assigned Managed Identity (RBAC)
 
 Azure Policy  → governs resource group
@@ -37,8 +37,8 @@ Pattern: `{type}-chainlit-rag-{env}` (globally unique resources drop hyphens)
 | App Service Plan | `asp-chainlit-rag-dev` |
 | App Service | `app-chainlit-rag-dev` |
 | Key Vault | `kv-chainlit-rag-dev` |
-| Storage Account | `stchainlitragdev` |
-| Blob Container | `rag-content` |
+
+> Storage Account and Blob Container have been removed. RAG data lives in Timescale Cloud (pgvector).
 
 ---
 
@@ -48,6 +48,7 @@ Pattern: `{type}-chainlit-rag-{env}` (globally unique resources drop hyphens)
 - Azure DevOps project created (e.g., `chainlit-rag`)
 - Contributor access on the target resource group (or subscription for first deploy)
 - `az bicep upgrade` run at least once (Bicep CLI 0.18+ required for `.bicepparam`)
+- Timescale Cloud service provisioned with pgvector extension enabled
 
 ---
 
@@ -85,26 +86,19 @@ In **Azure DevOps** → your project → **Project Settings** → **Pipelines** 
 
 > If the resource group dropdown shows "Loading..." indefinitely, complete step 2.0 first.
 
-### 2.2 Add the pipeline service principal Object ID to the pipeline
-
-Saving the ARM service connection creates an **Enterprise Application** in Entra ID. Get its Object ID (different from the App Registration's Object ID):
-
-```bash
-az ad sp list --display-name "azure-chainlit-rag" --query "[0].id" -o tsv
-```
-
-Or in **Azure Portal** → **Microsoft Entra ID** → **Enterprise applications** → search `azure-chainlit-rag` → copy **Object ID**.
-
-In `azure-pipelines.yml`, add or update the `variables:` block (safe to commit):
-
-```yaml
-variables:
-  PIPELINE_SP_OBJECT_ID: '<paste-your-object-id-here>'
-```
-
-### 2.3 Create the Pipeline
+### 2.2 Create the Pipeline
 
 In **Azure DevOps** → **Pipelines** → **New pipeline** → **GitHub** → select `chainlit-pydanticai-rag` → **Existing Azure Pipelines YAML file** → branch `main`, path `/azure-pipelines.yml` → **Continue** → **Save** (do not run yet).
+
+### 2.3 Add the pipeline service principal Object ID to the pipeline
+
+Saving the ARM service connection creates an **Enterprise Application** in Entra ID. You need its Object ID — this is different from the App Registration's Object ID shown in the Azure DevOps service connection details.
+
+In **Azure Portal** → **Microsoft Entra ID** → **Enterprise applications** → search for the auto-generated name matching your org and project (e.g. `jeffreyscotthoekman0908-chainlit-pg-<guid>`) → **Overview** → copy the **Object ID**.
+
+Set it as a pipeline UI variable (no YAML edit needed):
+
+In **Azure DevOps** → **Pipelines** → select the pipeline → **Edit** → **Variables** (top-right) → **New variable** → name: `PIPELINE_SP_OBJECT_ID`, value: `<object-id>`, uncheck **Keep this value secret** → **Save**.
 
 ### 2.4 Create the Deployment Environment
 
@@ -141,17 +135,9 @@ az deployment group what-if \
   --parameters infra/parameters.dev.bicepparam \
   --parameters pipelineServicePrincipalObjectId=$PIPELINE_SP_OBJECT_ID
 ```
-```
-# Expected:
-...
-Resource changes: 13 to create, 3 unsupported.
-Diagnostics (3):
-...
-```
-
 
 ### Apply
-```
+```bash
 az deployment group create \
   --resource-group rg-chainlit-rag-dev \
   --template-file infra/main.bicep \
@@ -165,10 +151,9 @@ az deployment group create \
 1. `identity` — User-Assigned Managed Identity (outputs feed everything else)
 2. `acr` — Container Registry (admin disabled; Managed Identity pull only)
 3. `keyVault` — Key Vault (RBAC authorization model, soft delete 7 days)
-4. `storage` — Storage Account + `rag-content` blob container (no public access)
-5. `appService` — App Service Plan (B2) + Web App with all app settings and KV references
-6. `rbac` — All role assignments (must complete before App Service resolves KV refs)
-7. `policy` — Azure Policy assignments (HTTPS-only, require `environment`/`application` tags)
+4. `appService` — App Service Plan (B2) + Web App with all app settings and KV references
+5. `rbac` — All role assignments (must complete before App Service resolves KV refs)
+6. `policy` — Azure Policy assignments (HTTPS-only, require `environment`/`application` tags)
 
 ---
 
@@ -195,14 +180,17 @@ az role assignment create \
 
 ### 4.1 Set the secrets
 
-Use the bash `for` loop with `read` shell built-in to securely enter the env vars: 
+Use the bash `for` loop with `read` shell built-in to securely enter the env vars:
 ```bash
-for var in ANTHROPIC_API_KEY OPENAI_API_KEY APP_PASSWORD CHAINLIT_AUTH_SECRET; do
+for var in ANTHROPIC_API_KEY OPENAI_API_KEY APP_PASSWORD CHAINLIT_AUTH_SECRET DATABASE_URL; do
   echo "$var" && read -rs $var
 done
 ```
 
-Create the Azure Key Vault secrets
+> For `DATABASE_URL`, enter the full Timescale Cloud connection string:
+> `postgresql://user:password@hostname.tsdb.cloud.timescale.com:5432/dbname?sslmode=require`
+
+Create the Azure Key Vault secrets:
 ```bash
 az keyvault secret set \
   --vault-name kv-chainlit-rag-dev \
@@ -223,6 +211,11 @@ az keyvault secret set \
   --vault-name kv-chainlit-rag-dev \
   --name chainlit-auth-secret \
   --value "$CHAINLIT_AUTH_SECRET"
+
+az keyvault secret set \
+  --vault-name kv-chainlit-rag-dev \
+  --name database-url \
+  --value "$DATABASE_URL"
 ```
 
 Restart the App Service to re-resolve the Key Vault references:
@@ -235,32 +228,48 @@ az webapp restart \
 
 ---
 
-## Step 5: Upload RAG Content to Blob Storage (one-time)
+## Step 5: Load KEV and NVD Data (one-time)
 
-### 5.0 Grant yourself write access to Blob Storage (one-time)
+Data is loaded directly into Timescale Cloud from your local machine. Run these steps once after the database is reachable. Set `DATABASE_URL` in your `.env` pointing to Timescale Cloud before running.
 
-Like Key Vault, the storage account uses RBAC — you need to grant yourself access before you can upload blobs.
+### 5.0 Verify pgvector is enabled on Timescale Cloud
 
+Connect to your Timescale Cloud instance and confirm:
 ```bash
-az role assignment create \
-  --role "Storage Blob Data Contributor" \
-  --assignee-object-id $(az ad signed-in-user show --query id -o tsv) \
-  --assignee-principal-type User \
-  --scope $(az storage account show \
-      --name stchainlitragdev \
-      --resource-group rg-chainlit-rag-dev \
-      --query id -o tsv)
+psql "$DATABASE_URL" -c "SELECT extname FROM pg_extension WHERE extname = 'vector';"
 ```
 
-### 5.1 Upload the content file
+If not present, enable it:
+```bash
+psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+
+### 5.1 Create the schema
+
+Schema creation runs automatically on app startup. To run manually:
+```bash
+uv run python -c "from rag.database import init_db; import asyncio; asyncio.run(init_db())"
+```
+
+### 5.2 Load CISA KEV data (~1,500 records)
+
+Fetches the CISA KEV catalog and generates OpenAI embeddings:
+```bash
+uv run python scripts/load_kev.py
+```
+
+### 5.3 Load NVD enrichment data
+
+Fetches CVSS scores, severity, and affected products from NIST NVD. Rate-limited — set `NVD_API_KEY` in `.env` to increase the rate limit ([request a key](https://nvd.nist.gov/developers/request-an-api-key)):
+```bash
+uv run python scripts/load_nvd.py
+```
+
+### 5.4 Verify record counts
 
 ```bash
-az storage blob upload \
-  --account-name stchainlitragdev \
-  --container-name rag-content \
-  --name content.txt \
-  --file data/content.txt \
-  --auth-mode login
+psql "$DATABASE_URL" -c "SELECT COUNT(*) FROM kev_vulnerabilities;"
+psql "$DATABASE_URL" -c "SELECT COUNT(*) FROM nvd_vulnerabilities;"
 ```
 
 ---
@@ -304,12 +313,12 @@ az acr repository show-tags \
 # 4. Health check responds 200
 curl -v https://app-chainlit-rag-dev.azurewebsites.net/healthz
 
-# 5. App logs confirm blob load and embedding success
+# 5. App logs confirm successful DB connection
 az webapp log tail \
   --name app-chainlit-rag-dev \
   --resource-group rg-chainlit-rag-dev
-# Expected: "Loading knowledge base from https://stchainlitragdev.blob.core.windows.net/..."
-# Expected: "Ready! Loaded N chunks from the knowledge base."
+# Expected: successful startup with no DB connection errors
+# Test query: "What vulnerabilities affect Apache?"
 
 # 6. WebSocket: open app in browser → DevTools → Network → WS tab → active connection
 
@@ -322,21 +331,6 @@ az webapp log tail \
 
 **New code:** push to `main` — pipeline handles everything.
 
-**New content file only:**
-
-```bash
-az storage blob upload \
-  --account-name stchainlitragdev \
-  --container-name rag-content \
-  --name content.txt \
-  --file data/content.txt \
-  --auth-mode login
-
-az webapp restart \
-  --name app-chainlit-rag-dev \
-  --resource-group rg-chainlit-rag-dev
-```
-
 **Updated secret value:**
 
 ```bash
@@ -348,6 +342,14 @@ az keyvault secret set \
 az webapp restart \
   --name app-chainlit-rag-dev \
   --resource-group rg-chainlit-rag-dev
+```
+
+**Reload KEV/NVD data** (e.g., after CISA publishes new entries):
+
+```bash
+uv run python scripts/load_kev.py
+uv run python scripts/load_nvd.py
+# No app restart needed — data is queried live from Timescale Cloud
 ```
 
 ---
@@ -368,8 +370,14 @@ az webapp restart \
 - Without it, the SDK falls through to system-assigned MI and fails
 
 **Container startup timeout**
-- `WEBSITE_CONTAINER_START_TIME_LIMIT: 230` allows 230s; if startup still times out, check logs for errors during blob load or embedding generation
+- `WEBSITE_CONTAINER_START_TIME_LIMIT: 230` allows 230s; if startup still times out, check logs for DB connection errors
 - The B2 plan has `alwaysOn: true`, so cold starts only happen after a restart or deploy
+
+**Database connection fails on startup**
+- Confirm `DATABASE_URL` KV secret is set and the reference resolved (`az webapp config appsettings list`)
+- Confirm the Timescale Cloud connection string includes `?sslmode=require`
+- Timescale Cloud requires SSL — connections without it will be refused
+- Check Timescale Cloud connection limits and allowed IP ranges if the app is blocked
 
 **Bicep deploy fails with `.bicepparam` syntax error**
 - Run `az bicep upgrade` to ensure Bicep CLI 0.18+
