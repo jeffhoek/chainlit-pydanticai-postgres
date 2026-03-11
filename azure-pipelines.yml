@@ -17,7 +17,6 @@ variables:
   appServiceName: app-chainlit-rag-dev
   azureServiceConnection: azure-chainlit-rag
   githubServiceConnection: github-chainlit-rag
-  PIPELINE_SP_OBJECT_ID: "$(PIPELINE_SP_OBJECT_ID)"
 
 stages:
   # ─────────────────────────────────────────────────────────────
