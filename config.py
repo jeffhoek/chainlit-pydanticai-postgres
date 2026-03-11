@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     nvd_api_key: Optional[str] = None
 
     # PostgreSQL Configuration
-    database_url: Optional[str] = None
+    # Use PG_DATABASE_URL (not DATABASE_URL) to avoid Chainlit auto-activating its data layer
+    pg_database_url: Optional[str] = None
     pg_host: str = "localhost"
     pg_port: int = 5432
     pg_user: str = "postgresuser"
@@ -18,8 +19,8 @@ class Settings(BaseSettings):
     pg_database: str = "inventory"
 
     def get_database_dsn(self) -> str:
-        if self.database_url:
-            return self.database_url
+        if self.pg_database_url:
+            return self.pg_database_url
         return f"postgresql://{self.pg_user}:{self.pg_password}@{self.pg_host}:{self.pg_port}/{self.pg_database}"
 
     # RAG Configuration

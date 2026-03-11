@@ -71,7 +71,7 @@ resource appService 'Microsoft.Web/sites@2023-12-01' = {
           value: '["What vulnerabilities affect Apache?","Show recent KEV entries","What ransomware campaigns are tracked?","What are the highest CVSS score vulnerabilities?"]'
         }
         {
-          name: 'DATABASE_URL'
+          name: 'PG_DATABASE_URL'
           value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=database-url)'
         }
         {
