@@ -2,7 +2,6 @@ from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.mcp import MCPServerStdio
 
 from config import settings
 from rag.embeddings import generate_embedding
@@ -15,16 +14,10 @@ class Deps:
     vector_store: PgVectorStore
 
 
-postgres_mcp = MCPServerStdio(
-    'npx',
-    args=['-y', '@modelcontextprotocol/server-postgres', settings.get_database_dsn()],
-)
-
 rag_agent = Agent(
     settings.llm_model,
     deps_type=Deps,
     system_prompt=settings.system_prompt,
-    toolsets=[postgres_mcp],
 )
 
 
