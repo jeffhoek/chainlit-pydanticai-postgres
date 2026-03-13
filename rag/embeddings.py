@@ -1,11 +1,11 @@
 from openai import AsyncOpenAI
 
-EMBEDDING_MODEL = "text-embedding-3-small"
+from config import settings
 
 
 async def generate_embedding(client: AsyncOpenAI, text: str) -> list[float]:
     """Generate embedding for a single text."""
-    response = await client.embeddings.create(model=EMBEDDING_MODEL, input=text)
+    response = await client.embeddings.create(model=settings.embedding_model, input=text)
     return response.data[0].embedding
 
 
@@ -16,5 +16,5 @@ async def generate_embeddings_batch(
     if not texts:
         return []
 
-    response = await client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+    response = await client.embeddings.create(model=settings.embedding_model, input=texts)
     return [item.embedding for item in response.data]
