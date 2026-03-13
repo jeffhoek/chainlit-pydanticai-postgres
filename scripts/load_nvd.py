@@ -29,7 +29,6 @@ from pgvector.asyncpg import register_vector
 from config import settings
 
 NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-EMBEDDING_MODEL = "text-embedding-3-small"
 BATCH_SIZE = 500
 
 # Rate limiting: 5 req/30s without key, 50 req/30s with key
@@ -186,7 +185,7 @@ async def generate_embeddings(openai_client: AsyncOpenAI, texts: list[str]) -> l
     all_embeddings = []
     for i in range(0, len(texts), BATCH_SIZE):
         batch = texts[i : i + BATCH_SIZE]
-        resp = await openai_client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
+        resp = await openai_client.embeddings.create(model=settings.embedding_model, input=batch)
         all_embeddings.extend([item.embedding for item in resp.data])
         print(f"  Embedded {min(i + BATCH_SIZE, len(texts))}/{len(texts)}")
     return all_embeddings

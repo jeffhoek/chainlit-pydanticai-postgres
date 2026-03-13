@@ -20,7 +20,6 @@ from pgvector.asyncpg import register_vector
 from config import settings
 
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
-EMBEDDING_MODEL = "text-embedding-3-small"
 BATCH_SIZE = 500
 
 
@@ -60,7 +59,7 @@ async def generate_embeddings(openai_client: AsyncOpenAI, texts: list[str]) -> l
     all_embeddings = []
     for i in range(0, len(texts), BATCH_SIZE):
         batch = texts[i : i + BATCH_SIZE]
-        resp = await openai_client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
+        resp = await openai_client.embeddings.create(model=settings.embedding_model, input=batch)
         all_embeddings.extend([item.embedding for item in resp.data])
         print(f"  Embedded {min(i + BATCH_SIZE, len(texts))}/{len(texts)}")
     return all_embeddings

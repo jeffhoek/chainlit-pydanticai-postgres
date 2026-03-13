@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # RAG Configuration
     top_k: int = 5
+    embedding_model: str = "text-embedding-3-small"
     llm_model: str = "anthropic:claude-haiku-4-5-20251001"
     system_prompt: str = (
         "You are a security analyst assistant with access to the CISA Known "
