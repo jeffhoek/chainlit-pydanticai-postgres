@@ -2,6 +2,8 @@
 
 A retrieval-augmented generation chatbot for vulnerability research, built with Pydantic AI and Chainlit. Indexes the CISA Known Exploited Vulnerabilities (KEV) catalog and NIST National Vulnerability Database (NVD) into PostgreSQL with pgvector, and answers questions using Claude with semantic search and direct SQL.
 
+![Architecture diagram](docs/chatbot-architecture.drawio.png)
+
 ## Features
 
 - CISA KEV + NVD datasets (~1,500 KEV entries, enriched with CVSS scores from NVD)
