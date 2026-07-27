@@ -136,7 +136,7 @@ def extract_ssvc(metrics: dict) -> dict:
 - Wire `extract_ssvc()` into `build_upsert_params()` ([scripts/load_nvd.py:145](scripts/load_nvd.py:145)) and `_prepare_row()` ([scripts/load_nvd_full.py:214](scripts/load_nvd_full.py:214)); extend both UPSERT statements and `STAGING_COLUMNS`.
 - **`build_content()`** ([scripts/nvd_utils.py:147](scripts/nvd_utils.py:147)): append SSVC factors and `affected` vendor/product names so semantic search surfaces them, e.g. `SSVC: exploitation=active, automatable=yes, technicalImpact=total` and `Affected: Apache Software Foundation Apache Log4j2`. This changes embedding inputs — see operational note on re-embedding.
 
-> **Chunk C is six coordinated edits, not one.** The `load_nvd_full.py` wiring is column-order-sensitive across six spots that must all stay aligned, or a bulk insert will silently shift values between columns:
+> **Wiring `load_nvd_full.py` is six coordinated edits, not one.** The column lists are order-sensitive across six spots that must all stay aligned, or a bulk insert will silently shift values between columns:
 > 1. `STAGING_COLUMNS` list ([scripts/load_nvd_full.py:80](scripts/load_nvd_full.py:80))
 > 2. `CREATE_STAGING_SQL` temp-table DDL ([scripts/load_nvd_full.py:98](scripts/load_nvd_full.py:98))
 > 3. `UPSERT_FROM_STAGING_SQL` — the `INSERT (…)` column list ([scripts/load_nvd_full.py:118](scripts/load_nvd_full.py:118))
@@ -144,7 +144,7 @@ def extract_ssvc(metrics: dict) -> dict:
 > 5. same statement — the `ON CONFLICT DO UPDATE SET` assignments
 > 6. `_prepare_row()` return tuple ([scripts/load_nvd_full.py:214](scripts/load_nvd_full.py:214))
 >
-> Append the five SSVC columns in the **same order** in all six. Chunk D (`load_nvd.py`) is the smaller sibling: `build_upsert_params()` tuple + the single `UPSERT_SQL` string. Do C and D together, or column sets drift between the two loaders depending on which one ran.
+> Append the five SSVC columns in the **same order** in all six. `load_nvd.py` is the smaller sibling: `build_upsert_params()` tuple + the single `UPSERT_SQL` string. Do both loaders in one pass, or column sets drift between them depending on which one ran.
 
 Optionally add an `extract_affected_named(cve.affected)` helper now (vendor/product strings) just for `build_content`, deferring dedicated columns to Tier 2.
 
@@ -165,6 +165,12 @@ Update [docs/nvd-integration.md](docs/nvd-integration.md) to document the new co
 ## 4. Operational plan for the re-sync (the latency / ETL-completion problem)
 
 The June-17 storm modified ~95% of records, so a normal incremental run's **Phase 2** ([scripts/load_nvd_full.py:533](scripts/load_nvd_full.py:533)) will try to re-pull ~all CVEs while the API is degraded and the modified feed is oversized (through ~June 25).
+
+**Prerequisite — the five SSVC columns must exist in the target database before the ETL runs.** The upserts now reference `ssvc_exploitation … ssvc_version`, so a sync against a database that lacks them will error. The columns ship in `SCHEMA_SQL` ([rag/database.py](rag/database.py)), but the loaders connect with a plain `asyncpg.connect` and do **not** apply `SCHEMA_SQL` (only `init_db()` does), and the production app runs `DB_INIT_SCHEMA=false` (read-only role, no DDL — see [docs/supabase-readonly-role.md](docs/supabase-readonly-role.md)). So apply the migration once with the **admin** connection before starting, and confirm:
+
+```bash
+psql "$ADMIN_DATABASE_URL" -c "\d nvd_vulnerabilities" | grep ssvc_   # expect 5 rows
+```
 
 Recommended sequence:
 
@@ -194,7 +200,17 @@ Recommended sequence:
      Updating the cron does not interrupt a run already in flight, and leaves the job (image, identity, env) otherwise untouched.
 3. Run the storm sync **`--skip-embeddings`** first: `--incremental --since 2026-06-15 --skip-embeddings`. Gets SSVC/affected into `raw_json` fast and cheaply; ~275k embeddings during a degraded window is the wrong time to pay that cost.
 4. **`--backfill-ssvc`** (new mode) to populate the five SSVC columns from `raw_json` — pure SQL/Python, no API.
-5. Optional **targeted re-embed** later: the `content` change is additive, so stale embeddings remain usable. If desired, a `--reembed-since` mode can refresh only storm-touched rows (the existing `--backfill-embeddings` only fills NULLs, so it won't refresh changed content — a new mode is needed).
+5. **Verify, then re-enable the scheduled job.** Confirm the columns populated, then restore the cron from step 2's RE-ENABLE command (do not leave the job disabled):
+
+   ```sql
+   -- distribution across the decision factor (expect none/poc/active buckets)
+   SELECT ssvc_exploitation, COUNT(*) FROM nvd_vulnerabilities GROUP BY 1 ORDER BY 2 DESC;
+   -- a known KEV CVE should read 'active'
+   SELECT cve_id, ssvc_exploitation, ssvc_automatable, ssvc_technical_impact
+   FROM nvd_vulnerabilities WHERE cve_id = 'CVE-2021-44228';
+   ```
+
+6. Optional **targeted re-embed** later: the `content` change is additive, so stale embeddings remain usable. If desired, a `--reembed-since` mode can refresh only storm-touched rows (the existing `--backfill-embeddings` only fills NULLs, so it won't refresh changed content — a new mode is needed).
 
 > Embedding-refresh nuance: the upsert sets `embedding = COALESCE(EXCLUDED.embedding, existing)` ([scripts/load_nvd_full.py:140](scripts/load_nvd_full.py:140)), so running incremental *with* embeddings would overwrite them — correct but expensive at storm scale. Hence the skip-then-backfill split above.
 
