@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS nvd_vulnerabilities (
     reference_urls TEXT[],
     published DATE,
     last_modified DATE,
+    ssvc_exploitation VARCHAR(8),
+    ssvc_automatable VARCHAR(4),
+    ssvc_technical_impact VARCHAR(8),
+    ssvc_decision VARCHAR(8),
+    ssvc_version VARCHAR(8),
     raw_json JSONB,
     content TEXT NOT NULL,
     embedding vector(1536)
@@ -51,12 +56,25 @@ CREATE TABLE IF NOT EXISTS nvd_vulnerabilities (
 -- Migration: add raw_json to existing tables
 ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS raw_json JSONB;
 
+-- Migration: add CISA-ADP SSVC v2.0.3 factor columns (see plans/ssvc-affected-integration.md)
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_exploitation     VARCHAR(8);   -- none|poc|active
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_automatable      VARCHAR(4);   -- yes|no
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_technical_impact VARCHAR(8);   -- partial|total
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_decision         VARCHAR(8);   -- Act|Attend|Track|Track* (nullable)
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_version          VARCHAR(8);   -- "2.0.3"
+
 CREATE INDEX IF NOT EXISTS nvd_embedding_idx
     ON nvd_vulnerabilities
     USING hnsw (embedding vector_cosine_ops);
 
 CREATE INDEX IF NOT EXISTS nvd_raw_json_gin_idx
     ON nvd_vulnerabilities USING gin (raw_json jsonb_path_ops);
+
+CREATE INDEX IF NOT EXISTS nvd_ssvc_exploitation_idx
+    ON nvd_vulnerabilities (ssvc_exploitation);
+
+CREATE INDEX IF NOT EXISTS nvd_ssvc_decision_idx
+    ON nvd_vulnerabilities (ssvc_decision);
 
 CREATE INDEX IF NOT EXISTS nvd_vuln_status_idx
     ON nvd_vulnerabilities ((raw_json->>'vulnStatus'));

@@ -35,6 +35,7 @@ from scripts.nvd_utils import (
     extract_cwes,
     extract_description,
     extract_reference_urls,
+    extract_ssvc,
     nvd_get_with_backoff,
     parse_date,
 )
@@ -47,8 +48,11 @@ UPSERT_SQL = """
         cve_id, description, cvss_v31_score, cvss_v31_severity,
         cvss_v31_vector, cvss_v2_score, cvss_v2_severity,
         cwes, affected_products, reference_urls,
-        published, last_modified, raw_json, content, embedding
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        published, last_modified,
+        ssvc_exploitation, ssvc_automatable, ssvc_technical_impact,
+        ssvc_decision, ssvc_version,
+        raw_json, content, embedding
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
     ON CONFLICT (cve_id) DO UPDATE SET
         description = EXCLUDED.description,
         cvss_v31_score = EXCLUDED.cvss_v31_score,
@@ -61,6 +65,11 @@ UPSERT_SQL = """
         reference_urls = EXCLUDED.reference_urls,
         published = EXCLUDED.published,
         last_modified = EXCLUDED.last_modified,
+        ssvc_exploitation = EXCLUDED.ssvc_exploitation,
+        ssvc_automatable = EXCLUDED.ssvc_automatable,
+        ssvc_technical_impact = EXCLUDED.ssvc_technical_impact,
+        ssvc_decision = EXCLUDED.ssvc_decision,
+        ssvc_version = EXCLUDED.ssvc_version,
         raw_json = EXCLUDED.raw_json,
         content = EXCLUDED.content,
         embedding = EXCLUDED.embedding
@@ -142,6 +151,7 @@ def build_upsert_params(cve_data: dict, embedding: list[float]) -> tuple:
     metrics = cve_data.get("metrics", {})
     cvss_v31_score, cvss_v31_severity, cvss_v31_vector = extract_cvss_v31(metrics)
     cvss_v2_score, cvss_v2_severity = extract_cvss_v2(metrics)
+    ssvc = extract_ssvc(metrics)
 
     return (
         cve_data.get("id"),
@@ -156,6 +166,11 @@ def build_upsert_params(cve_data: dict, embedding: list[float]) -> tuple:
         extract_reference_urls(cve_data.get("references", [])),
         parse_date(cve_data.get("published")),
         parse_date(cve_data.get("lastModified")),
+        ssvc.get("exploitation"),
+        ssvc.get("automatable"),
+        ssvc.get("technical_impact"),
+        ssvc.get("decision"),
+        ssvc.get("version"),
         json.dumps(cve_data),
         build_content(cve_data),
         np.array(embedding, dtype=np.float32),

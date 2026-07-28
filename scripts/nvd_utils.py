@@ -103,6 +103,31 @@ def extract_cvss_v2(metrics: dict) -> tuple:
     return None, None
 
 
+def extract_ssvc(metrics: dict) -> dict:
+    """Flatten CISA-ADP SSVC v2.0.3 factors into a dict of factor -> value.
+
+    SSVC is nested under ``metrics.ssvcV203`` (not a top-level CVE field). Each
+    entry's ``ssvcData.options`` is an array of single-key dicts, e.g.
+    ``[{"exploitation": "active"}, {"automatable": "yes"}, ...]``; they are merged
+    into one flat mapping. Returns ``{}`` when no SSVC block is present. The
+    rolled-up ``decision`` (Act/Attend/Track) is usually absent today — see plan.
+    """
+    for entry in metrics.get("ssvcV203", []):
+        data = entry.get("ssvcData", {})
+        opts: dict = {}
+        for o in data.get("options", []):
+            if isinstance(o, dict):
+                opts.update(o)
+        return {
+            "exploitation": opts.get("exploitation"),
+            "automatable": opts.get("automatable"),
+            "technical_impact": opts.get("technicalImpact"),
+            "decision": opts.get("decision"),  # usually absent today
+            "version": data.get("version"),
+        }
+    return {}
+
+
 def extract_cwes(weaknesses: list) -> list[str]:
     """Extract CWE IDs from weaknesses."""
     cwes = []
@@ -122,6 +147,25 @@ def extract_affected_products(configurations: list) -> list[str]:
                 if match.get("vulnerable"):
                     products.append(match.get("criteria", ""))
     return products
+
+
+def extract_affected_named(affected: list) -> list[str]:
+    """Extract distinct "vendor product" names from the top-level cve.affected block.
+
+    ``affected`` is the CVE-record-format list (richer than the CPE-based
+    ``configurations``); each entry's ``affectedData`` carries vendor/product
+    pairs. Returns human-readable names for embedding/search — order-preserving
+    and deduped. Used by build_content only; dedicated columns are deferred (Tier 2).
+    """
+    names: list[str] = []
+    for entry in affected or []:
+        for item in entry.get("affectedData", []):
+            vendor = (item.get("vendor") or "").strip()
+            product = (item.get("product") or "").strip()
+            name = " ".join(p for p in (vendor, product) if p)
+            if name and name not in names:
+                names.append(name)
+    return names
 
 
 def extract_description(descriptions: list) -> str:
@@ -151,6 +195,8 @@ def build_content(cve_data: dict) -> str:
     cvss_score, cvss_severity, cvss_vector = extract_cvss_v31(metrics)
     cwes = extract_cwes(cve_data.get("weaknesses", []))
     products = extract_affected_products(cve_data.get("configurations", []))
+    ssvc = extract_ssvc(metrics)
+    affected_named = extract_affected_named(cve_data.get("affected", []))
 
     parts = [
         f"CVE ID: {cve_data.get('id', '')}",
@@ -164,5 +210,20 @@ def build_content(cve_data: dict) -> str:
         parts.append(f"CWEs: {', '.join(cwes)}")
     if products:
         parts.append(f"Affected Products: {', '.join(products[:5])}")
+
+    ssvc_factors = [
+        f"{label}={ssvc[key]}"
+        for key, label in (
+            ("exploitation", "exploitation"),
+            ("automatable", "automatable"),
+            ("technical_impact", "technicalImpact"),
+            ("decision", "decision"),
+        )
+        if ssvc.get(key)
+    ]
+    if ssvc_factors:
+        parts.append(f"SSVC: {', '.join(ssvc_factors)}")
+    if affected_named:
+        parts.append(f"Affected: {', '.join(affected_named[:5])}")
 
     return "\n".join(parts)

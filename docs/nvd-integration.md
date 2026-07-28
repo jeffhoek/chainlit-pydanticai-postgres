@@ -68,11 +68,40 @@ TABLE: nvd_vulnerabilities (
   cvss_v31_score, cvss_v31_severity, cvss_v31_vector,
   cvss_v2_score, cvss_v2_severity,
   cwes, affected_products, reference_urls,
-  published, last_modified
+  published, last_modified,
+  ssvc_exploitation, ssvc_automatable, ssvc_technical_impact,
+  ssvc_decision, ssvc_version
 )
 ```
 
 Both tables also have `content` (text for display) and `embedding` (vector for semantic search).
+
+### SSVC columns (CISA-ADP prioritization)
+
+NVD began publishing CISA-ADP **SSVC** (Stakeholder-Specific Vulnerability
+Categorization) data on 2026-06-17. SSVC complements CVSS: CVSS measures
+*severity*, SSVC measures *how urgently to act*. The five typed columns are
+promoted from `raw_json` (source: `metrics.ssvcV203`):
+
+| Column | Values | Meaning |
+| --- | --- | --- |
+| `ssvc_exploitation` | `none` \| `poc` \| `active` | Exploitation state (`active` = exploited in the wild) |
+| `ssvc_automatable` | `yes` \| `no` | Whether exploitation can be automated at scale |
+| `ssvc_technical_impact` | `partial` \| `total` | Impact if exploited |
+| `ssvc_decision` | `Act` \| `Attend` \| `Track` \| `Track*` | Rolled-up CISA decision — usually NULL today (NVD ships factors only) |
+| `ssvc_version` | e.g. `2.0.3` | SSVC schema version |
+
+Populate these for already-synced rows with `--backfill-ssvc` (pure SQL/Python,
+no API — reads `raw_json`). KEV-listed CVEs are typically `ssvc_exploitation='active'`.
+
+### JSONB paths in `raw_json`
+
+Data not promoted to columns stays queryable via `raw_json`:
+
+- `raw_json->'metrics'->'ssvcV203'` — full SSVC block (source array-of-singletons `options`).
+- `raw_json->'affected'` — top-level CVE-record-format affected data: per-vendor/product/version
+  ranges (affected vs. fixed), **richer** than `affected_products` (which is the flat CPE list
+  from `configurations`).
 
 ## Database Backup
 Take a `pg_dump` backup using the following:
@@ -111,6 +140,9 @@ These use SQL against the `nvd_vulnerabilities` table:
 - "List CVEs with CRITICAL severity published in 2026"
 - "Which CWEs appear most frequently?"
 - "Show the distribution of CVSS severity levels"
+- "Count CVEs by SSVC exploitation state" (`GROUP BY ssvc_exploitation`)
+- "Show top remediation priorities: actively exploited, automatable, total technical impact"
+- "Which CVEs are CVSS 10.0 but SSVC exploitation is still 'none'?" (severity ≠ urgency)
 
 ### CWE weakness queries — JOIN with cwe_definitions
 
