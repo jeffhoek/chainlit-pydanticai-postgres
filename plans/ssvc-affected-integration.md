@@ -172,6 +172,25 @@ The June-17 storm modified ~95% of records, so a normal incremental run's **Phas
 psql "$ADMIN_DATABASE_URL" -c "\d nvd_vulnerabilities" | grep ssvc_   # expect 5 rows
 ```
 
+**Applying the schema to Supabase (prod) — use the *pooled* connection, and `psql`, not `init_db()`.** Hard-won specifics:
+
+- **Direct connection (`db.<ref>.supabase.co:5432`) is IPv6-only** unless you buy the IPv4 add-on. On an IPv4-only network it simply won't connect — this is expected, not a misconfig. Use the **pooler** hostname (`aws-0-<region>.pooler.supabase.com`), which is what worked in practice.
+- **Prefer raw `psql` DDL over `init_db()`.** `init_db()` uses asyncpg, whose prepared statements break over the pgBouncer **transaction** pooler (`:6543`) with "prepared statement already exists". Plain idempotent `ALTER`/`CREATE INDEX` statements via `psql` are pooler-safe in either mode. (`init_db()` only works cleanly over the **session** pooler, `:5432` on the pooler host, or a direct connection.)
+- Use plain `CREATE INDEX IF NOT EXISTS` (as below), **not** `CREATE INDEX CONCURRENTLY` — the latter can't run in a transaction and chokes on the transaction pooler. These columns are tiny/low-cardinality, so a non-concurrent build is a quick lock.
+- Run with the **admin/DDL role** (independent of direct-vs-pooled). Applied 2026-07-27.
+
+```bash
+psql "<admin-pooled-supabase-dsn>" <<'SQL'
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_exploitation     VARCHAR(8);
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_automatable      VARCHAR(4);
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_technical_impact VARCHAR(8);
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_decision         VARCHAR(8);
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_version          VARCHAR(8);
+CREATE INDEX IF NOT EXISTS nvd_ssvc_exploitation_idx ON nvd_vulnerabilities (ssvc_exploitation);
+CREATE INDEX IF NOT EXISTS nvd_ssvc_decision_idx     ON nvd_vulnerabilities (ssvc_decision);
+SQL
+```
+
 Recommended sequence:
 
 1. ~~**Deploy the exponential-backoff PR first.**~~ **Done — merged in [PR #93](https://github.com/jeffhoek/vulncopilot/pull/93).** This replaced the old fixed 10–30s retry sleeps ([scripts/load_nvd_full.py:199](scripts/load_nvd_full.py:199)) that stalled under sustained latency. Prerequisite for finishing the storm sync — satisfied.
