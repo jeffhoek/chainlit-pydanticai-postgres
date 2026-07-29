@@ -63,38 +63,40 @@ ranking and gives the Composite Risk Score and retrieval scoring a second
 prioritization signal to blend alongside EPSS. Remaining follow-on is **Tier 2**
 — promoting `affected` vendor/product/version *ranges* to structured columns.
 
-## High Priority — Production-Readiness
+### EPSS Score Ingestion ✅ *(plan: [epss-score-integration.md](epss-score-integration.md); docs: [epss-integration.md](../docs/epss-integration.md))*
 
-### EPSS Score Ingestion ⬅️ *next up*
-
-Load the [Exploit Prediction Scoring System](https://www.first.org/epss/) daily
-feed from FIRST.org into a new `epss_scores` table keyed by CVE ID. EPSS gives
+Loads the [Exploit Prediction Scoring System](https://www.first.org/epss/) daily
+feed from FIRST.org into an `epss_scores` table keyed by CVE ID. EPSS gives
 each CVE a probability (0.0–1.0) that it will be exploited in the wild within
 the next 30 days, plus a percentile rank against all scored CVEs. It fills the
 gap between CVSS ("how bad if exploited") and KEV ("confirmed exploited now"):
 a CVSS 9.8 with EPSS 0.001 is likely noise, while a CVSS 6.5 with EPSS 0.95
 deserves attention this week.
 
-- **Source**: `https://epss.cyentia.com/epss_scores-current.csv.gz`, ~250K
-  rows, refreshed daily. Same loader shape as the KEV pipeline.
-- **Schema**: `epss_scores(cve_id PK, probability REAL, percentile REAL,
-  scored_at DATE)`. Optional `epss_scores_history` for trend queries.
-- **Tool surface**: extend the `query` tool's schema awareness so the agent
-  can `ORDER BY epss.probability DESC` and filter on percentile. Surface EPSS
-  in `retrieve` result cards alongside CVSS and KEV status.
-- **Unlocks**: "Show me high-EPSS CVEs that aren't on KEV yet" (the leading
-  indicator query), "rank our open vulnerabilities by likelihood of
-  exploitation," and the Composite Risk Score below.
-- **Prerequisite for**: Composite Risk Score, EPSS-weighted retrieval scoring
-  (see Medium Priority below).
+Shipped: `scripts/load_epss.py` bulk-loads the daily feed (**353,212 rows in
+~2.3s** via a temp-staging COPY + upsert) and runs as a third step in
+`run_etl.py`; the agent learned the table, a four-signal primer
+(severity/likelihood/confirmed/urgency), the mandatory `LEFT JOIN`, and the
+score-distribution bands via the system prompt, MCP docstring, and three EPSS
+quick-query buttons. This unlocks the leading-indicator query — "high-EPSS CVEs
+that aren't on KEV yet" — and gives the Composite Risk Score its load-bearing
+input.
 
-Prioritized above STIG/IAVA because it's a *universal* signal — every CVE gets
-an EPSS score regardless of audience — and because it's the load-bearing
-dependency for the Composite Risk Score and retrieval-scoring work below. The
-loader is the same shape as the existing KEV pipeline. STIG/IAVA, by contrast,
-is high value only for DoD/federal users (see Medium Priority).
+Notes worth carrying forward:
 
-### Composite Risk Score Tool
+- **Source moved**: the long-documented `epss.cyentia.com` host now only
+  redirects to `epss.empiricalsecurity.com`, and `-current` redirects again to a
+  dated file. httpx needs explicit `follow_redirects=True`.
+- **Separate table, not columns on `nvd_vulnerabilities`** — EPSS republishes
+  every score daily, and under MVCC that would rewrite each row's `raw_json` and
+  1536-dim `embedding` (plus HNSW maintenance) ~353k times a day.
+- **Deferred**: `epss_scores_history` (129M rows/year — `previous_probability`
+  covers "what moved" at zero cost) and surfacing EPSS in `retrieve` result
+  cards, which needs a `vector_store.search` signature change.
+
+## High Priority — Production-Readiness
+
+### Composite Risk Score Tool ⬅️ *next up*
 
 A third agent tool, `risk_score(cve_id)`, that returns a single 0–100 number
 plus a structured breakdown of contributing factors. Internally a SQL query

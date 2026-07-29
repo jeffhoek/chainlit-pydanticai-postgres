@@ -376,6 +376,14 @@ one bulk upsert, well under a minute.
    and [infra/modules/app-service.bicep:181](infra/modules/app-service.bicep). Suggested:
    *"High-EPSS CVEs not yet on KEV"*, *"CVSS 9+ but low exploitation likelihood"*,
    *"Biggest EPSS movers"*.
+
+   > **Found during implementation:** the bicep also set `SYSTEM_PROMPT` to a hand-copied
+   > duplicate of `config.py`'s prompt, and it had already gone stale — the SSVC columns and
+   > primer never made it in, so the deployed Azure app could not answer its own SSVC buttons,
+   > and EPSS would have landed the same way. **Resolved by deleting the override** (51 lines)
+   > so Azure falls back to `config.py`, which is what `k8s/configmap.yaml` already does
+   > deliberately. Azure App Service replaces the whole `appSettings` collection on deploy, so
+   > the stale setting is removed on the next deploy with no manual step.
 7. **Docs.** New `docs/epss-integration.md` modeled on
    [docs/cwe-integration.md](docs/cwe-integration.md); add rows to the loader table in
    [docs/data-loading.md:59](docs/data-loading.md) and the docs index

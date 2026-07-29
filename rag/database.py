@@ -60,7 +60,7 @@ ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS raw_json JSONB;
 ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_exploitation     VARCHAR(8);   -- none|poc|active
 ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_automatable      VARCHAR(4);   -- yes|no
 ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_technical_impact VARCHAR(8);   -- partial|total
-ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_decision         VARCHAR(8);   -- Act|Attend|Track|Track* (nullable)
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_decision         VARCHAR(8);   -- Act|Attend|Track*
 ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_version          VARCHAR(8);   -- "2.0.3"
 
 CREATE INDEX IF NOT EXISTS nvd_embedding_idx
@@ -78,6 +78,29 @@ CREATE INDEX IF NOT EXISTS nvd_ssvc_decision_idx
 
 CREATE INDEX IF NOT EXISTS nvd_vuln_status_idx
     ON nvd_vulnerabilities ((raw_json->>'vulnStatus'));
+
+-- FIRST.org EPSS daily scores (see plans/epss-score-integration.md).
+-- Deliberately a separate narrow table rather than columns on nvd_vulnerabilities:
+-- EPSS republishes every score daily, and under MVCC an UPDATE rewrites the whole
+-- heap tuple — which there would mean rewriting raw_json and the 1536-dim embedding
+-- (plus HNSW index maintenance) for all ~353k rows, every day.
+-- No FK to nvd_vulnerabilities: the row sets only partially overlap in both
+-- directions (EPSS skips REJECTED/RESERVED CVEs; it can also score a CVE before
+-- our NVD sync picks it up), so consumers must LEFT JOIN.
+CREATE TABLE IF NOT EXISTS epss_scores (
+    cve_id               VARCHAR(20) PRIMARY KEY,  -- natural PK; no SERIAL, so no sequence grant
+    probability          NUMERIC(6,5) NOT NULL,    -- 0–1 chance of exploitation in next 30 days
+    percentile           NUMERIC(6,5) NOT NULL,    -- rank against all scored CVEs
+    scored_at            DATE NOT NULL,            -- the feed's score_date
+    model_version        VARCHAR(16),              -- e.g. 'v2026.06.15'
+    previous_probability NUMERIC(6,5),             -- prior publication's score (movement queries)
+    previous_scored_at   DATE
+);
+
+-- NUMERIC over REAL so threshold filters (WHERE probability >= 0.9) compare exactly;
+-- binary float would let a stored 0.9 read as 0.89999998 and drop boundary rows.
+
+CREATE INDEX IF NOT EXISTS epss_probability_idx ON epss_scores (probability DESC);
 
 CREATE TABLE IF NOT EXISTS cwe_definitions (
     cwe_id      VARCHAR(20) PRIMARY KEY,

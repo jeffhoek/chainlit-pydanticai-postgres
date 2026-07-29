@@ -7,6 +7,7 @@
 | [data-loading.md](data-loading.md) | ETL guide for populating the database with CISA KEV and NVD data (KEV-scoped and full NVD) |
 | [nvd-integration.md](nvd-integration.md) | NVD & CISA KEV dataset integration, schema, and cross-reference query examples |
 | [cwe-integration.md](cwe-integration.md) | MITRE CWE weakness taxonomy integration — `cwe_definitions` lookup table, ETL script, and example JOIN queries |
+| [epss-integration.md](epss-integration.md) | FIRST.org EPSS exploitation-likelihood scores — `epss_scores` table, daily feed ETL, and prioritization query examples |
 | [mcp-server.md](mcp-server.md) | MCP server setup — exposes `retrieve` and `query` tools at `/mcp` for external agents |
 | [action-buttons.md](action-buttons.md) | Configure Chainlit action buttons on the welcome message for quick-access suggested questions |
 | [observability.md](observability.md) | Observability integrations — self-hosted Langfuse (Compose) and cloud-hosted Logfire |
