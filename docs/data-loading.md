@@ -52,7 +52,7 @@ uv run python -c "from rag.database import init_db; import asyncio; asyncio.run(
 
 ## ETL Scripts
 
-There are four ETL scripts, each targeting a different scope:
+There are five ETL scripts, each targeting a different scope:
 
 | Script | Scope | Records | Use case |
 |---|---|---|---|
@@ -60,6 +60,7 @@ There are four ETL scripts, each targeting a different scope:
 | `scripts/load_nvd.py` | NVD data for KEV CVEs only | ~1,500 | Enriches KEV entries with CVSS scores, severity, affected products |
 | `scripts/load_nvd_full.py` | Entire NVD database | ~280,000 | Full NVD corpus for broader vulnerability research |
 | `scripts/load_cwe.py` | MITRE CWE definitions | ~900 | Resolves opaque CWE IDs to human-readable weakness names/descriptions |
+| `scripts/load_epss.py` | FIRST.org EPSS daily scores | ~353,000 | Exploitation-likelihood signal for prioritization; leading indicator to KEV |
 
 ### 1. Load CISA KEV data
 
@@ -141,29 +142,41 @@ Already-processed records will upsert harmlessly.
    caffeinate -i uv run python scripts/load_nvd_full.py --incremental
    ```
 
-**HNSW index and large incremental syncs:**
+**HNSW index and large incremental syncs — drop before, rebuild after:**
 
-NVD modifies thousands of CVEs per week for routine metadata refreshes (CVSS rescoring, CPE updates, etc.), so large incremental windows can involve 20k–80k upserts. Maintaining the HNSW vector index on every batch causes significant Disk IO — on constrained hosting (e.g. Supabase Micro) this can make each 2,000-row batch take several minutes.
+NVD modifies thousands of CVEs per week for routine metadata refreshes (CVSS rescoring, CPE updates, etc.), so large incremental windows can involve tens of thousands of upserts (a catch-up after a long gap can touch the whole corpus). Maintaining the HNSW vector index on every batch causes significant Disk IO — per-row HNSW maintenance dominates the run, and on constrained hosting each 2,000-row batch can take several minutes.
 
-For large syncs (roughly monthly or after a long gap), drop the index before running and rebuild it afterward. **Upgrade to Medium compute before the rebuild** — Micro cannot allocate enough shared memory for a usable `maintenance_work_mem` setting, making the build extremely slow. Downgrade back to Micro when done.
+**Dropping the index before a large bulk load and rebuilding it afterward is the single biggest lever — roughly a 5–10× speedup.** With `--skip-embeddings` the vectors don't change at all, so drop-then-rebuild reproduces an identical index and is lossless; even with embeddings, one clean rebuild is far cheaper than per-batch maintenance.
+
+> **Baseline:** a full storm catch-up of `--incremental --since 2026-06-15 --skip-embeddings` synced **366,846 CVEs in 70m49s** on Supabase **Large (8 GB / 2-core)** with the HNSW index dropped.
+
+**Bump Supabase compute (RAM, not cores) for the run, scale back down after.** The working set — a large HNSW index plus the heap — doesn't fit the small tiers, so more RAM means fewer IO cache-miss stalls; Large (8 GB) comfortably holds it. Cores don't help: Medium and Large are both 2-core and the ETL is a single stream, so the extra spend on cores buys nothing. Scale back down to your steady-state tier once the sync and rebuild finish.
 
 > **Running this in the cloud instead of a laptop?** These same catch-ups (and the HNSW drop/rebuild + schedule-disable steps) are driven from Azure DevOps via the manual [ETL pipeline](etl-pipeline.md), which starts a long-timeout Container Apps Job — no `caffeinate`, no laptop.
 
 ```sql
--- Before ETL (run in Supabase SQL editor or psql)
+-- 1. Before ETL (run in psql, or the Supabase SQL editor)
 DROP INDEX IF EXISTS nvd_embedding_idx;
 ```
 
 ```bash
+# 2. Run the sync with the index gone
 caffeinate -i uv run python scripts/load_nvd_full.py --incremental
 ```
 
 ```bash
-# After ETL — rebuild with 1GB maintenance_work_mem (max usable on Medium)
-caffeinate -i time psql "$DATABASE_URL" -c "SET statement_timeout = 0; SET maintenance_work_mem = '1GB'; CREATE INDEX nvd_embedding_idx ON nvd_vulnerabilities USING hnsw (embedding vector_cosine_ops);"
+# 3. After ETL — rebuild in ONE session with 2GB maintenance_work_mem (usable on Large).
+#    statement_timeout = 0 is mandatory: the Supabase SQL editor otherwise times out
+#    and rolls back a long index build partway through. Prefer psql for this reason.
+caffeinate -i time psql "$DATABASE_URL" -c "SET statement_timeout = 0; SET maintenance_work_mem = '2GB'; CREATE INDEX nvd_embedding_idx ON nvd_vulnerabilities USING hnsw (embedding vector_cosine_ops);"
 ```
 
-Monitor progress in the Supabase SQL editor:
+```bash
+# 4. Refresh planner statistics so the new index is actually used
+psql "$DATABASE_URL" -c "ANALYZE nvd_vulnerabilities;"
+```
+
+Monitor rebuild progress in the Supabase SQL editor:
 
 ```sql
 SELECT phase, tuples_done, tuples_total,
@@ -172,7 +185,7 @@ FROM pg_stat_progress_create_index
 WHERE relid = 'nvd_vulnerabilities'::regclass;
 ```
 
-The row disappears when the build completes. On Medium with 1GB `maintenance_work_mem`, expect ~60 minutes for ~346k rows at 1536 dimensions. The chatbot's semantic search is unavailable during this window but the app remains up.
+The row disappears when the build completes. Expect roughly an hour for ~366k rows at 1536 dimensions; the chatbot's semantic search is unavailable during the rebuild window but the app remains up.
 
 For smaller weekly syncs the index overhead is usually tolerable — skip the drop/rebuild unless upsert batches start taking several minutes.
 
@@ -185,6 +198,16 @@ uv run python scripts/load_cwe.py
 ```
 
 No API key or authentication required. The script is idempotent — re-running pulls the latest CWE release (published 2–3 times per year) and upserts any changes. See [cwe-integration.md](cwe-integration.md) for schema and example join queries.
+
+### 5. Load EPSS scores (optional)
+
+Loads FIRST.org's daily exploitation-likelihood scores into `epss_scores`, giving each CVE a probability of being exploited within 30 days plus a percentile rank:
+
+```bash
+uv run python scripts/load_epss.py
+```
+
+No API key required, and fast — ~353k rows in a couple of seconds via a bulk staging upsert. The feed refreshes daily, so this is worth running on the same schedule as KEV. Re-running within the same publication is idempotent. See [epss-integration.md](epss-integration.md) for schema, the redirect/format gotchas, and prioritization query examples.
 
 ## NVD API Key
 
@@ -214,7 +237,7 @@ uv run python scripts/load_nvd.py
 # Weekly — index overhead is usually fine
 caffeinate -i uv run python scripts/load_nvd_full.py --incremental
 
-# Monthly / large gap — upgrade to Medium compute, drop HNSW index first, rebuild after (see above)
+# Monthly / large gap — bump to Large compute (RAM, not cores), drop HNSW index first, rebuild after (see above)
 ```
 
 No app restart is needed — data is queried live from the database.

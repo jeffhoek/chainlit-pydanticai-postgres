@@ -37,7 +37,11 @@ Good buttons exercise the full range of what the agent can do. Aim for a mix tha
 | SQL → landmark CVE | `"CVE-2021-44228 (Log4Shell)"` | Direct CVE lookup. The parenthetical nickname keeps the label recognizable and gives the agent routing context — a bare product/vendor name with no vuln wording (e.g. `"Anthropic Claude"`) can be misread as a question about the assistant itself and refused. Prefer `"Anthropic Claude vulns"`. |
 | SQL → specific CVE with URLs | `"Reference URLs for CVE-2025-53770 (SharePoint ToolShell)"` | Fetches `reference_urls` from `nvd_vulnerabilities` |
 | Semantic search | `"LLM prompt injection vulns"` | Triggers the `retrieve` tool via embedding similarity |
-| Semantic + SQL | `"OpenClaw"` | Semantic match resolves the CVEs, then SQL fetches details |
+| SQL → SSVC prioritization | `"Top actively-exploited, automatable, total-impact CVEs"` | Filters `nvd_vulnerabilities` on the SSVC columns (`ssvc_exploitation`/`ssvc_automatable`/`ssvc_technical_impact`) — CISA's "patch now" set — ordered by CVSS |
+| SQL → SSVC vs CVSS | `"CVSS 10.0 CVEs not yet exploited (SSVC none)"` | Demonstrates severity ≠ urgency: a max CVSS score with `ssvc_exploitation='none'` isn't top priority yet |
+| SQL → EPSS vs KEV | `"High-EPSS CVEs not yet listed in KEV"` | The leading-indicator query: joins `epss_scores` to `nvd_vulnerabilities` and anti-joins `kev_vulnerabilities`. EPSS predicts, KEV confirms — so this surfaces what's likely to land on KEV next |
+| SQL → EPSS vs CVSS | `"CVSS 9+ CVEs with low exploitation likelihood"` | Severity ≠ likelihood: high CVSS with `probability < 0.01` is the noise-filtering counterpart to the SSVC button above |
+| SQL → EPSS movement | `"Biggest EPSS movers since the last update"` | Exercises `previous_probability`; returns nothing until a second daily publication has loaded, so expect an empty result on a freshly seeded database |
 
 Buttons that mention URLs (e.g. "Reference URLs for …") explicitly signal to the agent to select `reference_urls` from NVD, which it may otherwise omit.
 

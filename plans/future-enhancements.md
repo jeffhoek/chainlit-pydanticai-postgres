@@ -43,9 +43,7 @@ The remaining gap is the **data freshness indicator** in the UI / API
 responses ("KEV last synced: 4 hours ago") — the scheduling half is done; the
 surfacing half is not.
 
-## High Priority — Production-Readiness
-
-### SSVC Integration *(plan: [ssvc-affected-integration.md](ssvc-affected-integration.md))*
+### SSVC Integration ✅ *(PR [#126](https://github.com/jeffhoek/vulncopilot/pull/126); plan: [ssvc-affected-integration.md](ssvc-affected-integration.md))*
 
 NVD began publishing CISA-ADP **SSVC** (Stakeholder-Specific Vulnerability
 Categorization) decision factors and CVE-Record-Format **affected** data inside
@@ -54,82 +52,99 @@ the three CISA factors `exploitation` (none/poc/active), `automatable` (yes/no),
 and `technicalImpact` (partial/total) — and complements CVSS the same way EPSS
 does: severity is not the same as priority.
 
-Top priority among the new data sources for three reasons: it's the freshest
-(shipped days ago), it's nearly free to adopt (the entire `cve` object already
-lands in `nvd_vulnerabilities.raw_json`, so an incremental re-sync captures SSVC
-with zero schema changes), and it carries **operational urgency** — the June-17
-deployment modified ~95% of all CVE records, so the storm re-sync needs to be
-sequenced carefully to avoid colliding with the scheduled ETL job.
+Shipped through Tier 1: the SSVC factors are promoted to typed, indexed columns
+on `nvd_vulnerabilities`, wired into both NVD loaders (with a `--backfill-ssvc`
+mode to populate them from existing `raw_json`), surfaced alongside affected
+vendor/product in the embedded `content`, and taught to the agent via the system
+prompt plus SSVC quick-query buttons (PR
+[#130](https://github.com/jeffhoek/vulncopilot/pull/130)). This unlocks the
+"active + automatable + total technical impact = top remediation priority"
+ranking and gives the Composite Risk Score and retrieval scoring a second
+prioritization signal to blend alongside EPSS. Remaining follow-on is **Tier 2**
+— promoting `affected` vendor/product/version *ranges* to structured columns.
 
-- **Tier 0 (no code)**: re-sync, teach the system prompt the `raw_json` JSONB
-  paths. Minimum viable SSVC support.
-- **Tier 1 (recommended)**: promote the low-cardinality SSVC factors to typed,
-  indexed columns for clean filtering/aggregation; surface SSVC + affected
-  vendor/product in the embedded `content`.
-- **Tier 2 (later)**: promote `affected` vendor/product/version ranges to
-  structured columns.
-- **Unlocks**: "active + automatable + total technical impact = top remediation
-  priority" ranking, and a second prioritization signal for the Composite Risk
-  Score and retrieval scoring alongside EPSS.
+### EPSS Score Ingestion ✅ *(PR [#133](https://github.com/jeffhoek/vulncopilot/pull/133); plan: [epss-score-integration.md](epss-score-integration.md); docs: [epss-integration.md](../docs/epss-integration.md))*
 
-### EPSS Score Ingestion
-
-Load the [Exploit Prediction Scoring System](https://www.first.org/epss/) daily
-feed from FIRST.org into a new `epss_scores` table keyed by CVE ID. EPSS gives
+Loads the [Exploit Prediction Scoring System](https://www.first.org/epss/) daily
+feed from FIRST.org into an `epss_scores` table keyed by CVE ID. EPSS gives
 each CVE a probability (0.0–1.0) that it will be exploited in the wild within
 the next 30 days, plus a percentile rank against all scored CVEs. It fills the
 gap between CVSS ("how bad if exploited") and KEV ("confirmed exploited now"):
 a CVSS 9.8 with EPSS 0.001 is likely noise, while a CVSS 6.5 with EPSS 0.95
 deserves attention this week.
 
-- **Source**: `https://epss.cyentia.com/epss_scores-current.csv.gz`, ~250K
-  rows, refreshed daily. Same loader shape as the KEV pipeline.
-- **Schema**: `epss_scores(cve_id PK, probability REAL, percentile REAL,
-  scored_at DATE)`. Optional `epss_scores_history` for trend queries.
-- **Tool surface**: extend the `query` tool's schema awareness so the agent
-  can `ORDER BY epss.probability DESC` and filter on percentile. Surface EPSS
-  in `retrieve` result cards alongside CVSS and KEV status.
-- **Unlocks**: "Show me high-EPSS CVEs that aren't on KEV yet" (the leading
-  indicator query), "rank our open vulnerabilities by likelihood of
-  exploitation," and the Composite Risk Score below.
-- **Prerequisite for**: Composite Risk Score, EPSS-weighted retrieval scoring
-  (see Medium Priority below).
+Shipped: `scripts/load_epss.py` bulk-loads the daily feed (**353,212 rows in
+~2.3s** via a temp-staging COPY + upsert) and runs as a third step in
+`run_etl.py`; the agent learned the table, a four-signal primer
+(severity/likelihood/confirmed/urgency), the mandatory `LEFT JOIN`, and the
+score-distribution bands via the system prompt, MCP docstring, and three EPSS
+quick-query buttons. This unlocks the leading-indicator query — "high-EPSS CVEs
+that aren't on KEV yet" — and gives the Composite Risk Score its load-bearing
+input.
 
-Prioritized above STIG/IAVA because it's a *universal* signal — every CVE gets
-an EPSS score regardless of audience — and because it's the load-bearing
-dependency for the Composite Risk Score and retrieval-scoring work below. The
-loader is the same shape as the existing KEV pipeline. STIG/IAVA, by contrast,
-is high value only for DoD/federal users (see Medium Priority).
+Notes worth carrying forward:
 
-### Composite Risk Score Tool
+- **Source moved**: the long-documented `epss.cyentia.com` host now only
+  redirects to `epss.empiricalsecurity.com`, and `-current` redirects again to a
+  dated file. httpx needs explicit `follow_redirects=True`.
+- **Separate table, not columns on `nvd_vulnerabilities`** — EPSS republishes
+  every score daily, and under MVCC that would rewrite each row's `raw_json` and
+  1536-dim `embedding` (plus HNSW maintenance) ~353k times a day.
+- **Deferred**: `epss_scores_history` (129M rows/year — `previous_probability`
+  covers "what moved" at zero cost) and surfacing EPSS in `retrieve` result
+  cards, which needs a `vector_store.search` signature change.
+
+## High Priority — Production-Readiness
+
+### Composite Risk Score Tool ⬅️ *next up — unblocked*
+
+**All four input signals are now in Postgres.** With EPSS shipped, this is the
+last piece that turns four independent columns into one answer to the question
+analysts actually ask: *what do I patch first?*
 
 A third agent tool, `risk_score(cve_id)`, that returns a single 0–100 number
 plus a structured breakdown of contributing factors. Internally a SQL query
-joining `nvd_cves`, `kev_catalog`, `epss_scores`, and `cwe_definitions`, plus a
-pure Python function that blends:
+joining `nvd_vulnerabilities`, `kev_vulnerabilities`, `epss_scores`, and
+`cwe_definitions`, plus a pure Python function that blends:
 
-- CVSS base score (normalized 0–1), weight ~0.30
-- EPSS probability, weight ~0.30
-- KEV listed → flat +0.25 bonus
-- KEV ransomware-use → flat +0.10 bonus
-- SSVC factors (once ingested) — `exploitation=active` and `automatable=yes`
-  reinforce the EPSS/KEV signal; usable as a small weighted bump or as an
-  explainability input in the rationale
-- CWE class severity (memory corruption / injection > info-disclosure / DoS),
-  small static mapping, weight ~0.05
+| Signal | Source | Weight |
+| --- | --- | --- |
+| CVSS base score, normalized 0–1 | `COALESCE(cvss_v31_score, cvss_v2_score) / 10` | 0.25 |
+| EPSS probability | `epss_scores.probability` | 0.30 |
+| KEV listed | presence in `kev_vulnerabilities` | +0.20 flat |
+| KEV ransomware use | `known_ransomware_campaign_use = 'Known'` | +0.10 flat |
+| SSVC urgency | `ssvc_exploitation=active` (+0.06), `automatable=yes` (+0.02), `technical_impact=total` (+0.02) | up to +0.10 |
+| CWE class severity | static map over `cwes[]` (memory corruption / injection > info-disclosure / DoS) | 0.05 |
+
+Sums to 1.0 at maximum, ×100 for the reported score. Bands: 0–39 low, 40–69
+moderate, 70–84 high, 85–100 critical.
 
 Returned shape: `{cve_id, score, band, components: {...}, rationale}` so the
 agent can both rank and explain. Also exposed as a SQL view (`v_cve_risk`) so
 the existing `query` tool can `ORDER BY risk_score DESC` for bulk questions.
 
-This is the natural high-leverage payoff once EPSS is loaded: every API-only
-competitor computes this with live fan-out per CVE; with everything pre-joined
-in Postgres, the whole dataset ranks in milliseconds.
+Implementation notes carried over from EPSS:
+
+- **`LEFT JOIN epss_scores`, always** — the row sets only partially overlap
+  (EPSS skips REJECTED/RESERVED CVEs and can score a CVE before our NVD sync
+  sees it). A missing EPSS row contributes 0, not NULL — the score must never
+  come back NULL because one signal is absent.
+- **Coalesce CVSS versions** — older CVEs carry only `cvss_v2_score`; treating
+  a NULL v3.1 as "no severity" silently zeroes the largest weight.
+- **`previous_probability` is free movement data** — a CVE whose EPSS jumped
+  this week is a stronger call to action than a flat one at the same score.
+  Worth surfacing in `rationale` even if it stays out of the weighted sum.
+
+This is the natural high-leverage payoff now that EPSS is loaded: every
+API-only competitor computes this with live fan-out per CVE; with everything
+pre-joined in Postgres, the whole dataset ranks in milliseconds.
 
 Tuning: ship with fixed weights, log components via Langfuse, revisit once
 real usage data shows which CVEs analysts actually act on.
 
-**Depends on**: EPSS Score Ingestion above.
+**Unblocks**: Software Inventory Matching (rank only the CVEs that apply),
+Alerting (threshold on risk band rather than raw CVSS), and Retrieval Scoring
+Beyond Vector Similarity (reuse `v_cve_risk` as the ranking weight).
 
 ### Software Inventory Matching
 
@@ -313,15 +328,15 @@ query phrasing:
 
 - **KEV status** — known-exploited CVEs rank above non-KEV results at equal
   similarity
-- **EPSS score** — once ingested (see High Priority), use exploitation
-  likelihood as a retrieval weight
-- **SSVC factors** — once ingested (see High Priority), boost
+- **EPSS score** — now ingested (see Recently Shipped), use `probability` as a
+  retrieval weight via a `LEFT JOIN epss_scores`
+- **SSVC factors** — now ingested (see Recently Shipped), boost
   `exploitation=active` / `automatable=yes` records as a triage signal
 - **Recency** — `date_added` to KEV or NVD publish date as a decay factor
 - **User feedback** — upvoted CVEs gain a small boost (ties into User Feedback
   Loop)
-- **Top-K tuning** — as more datasets are added (STIG, EPSS, GitHub advisories),
-  increase top-K and rely on Reranking to maintain precision
+- **Top-K tuning** — as more datasets are added (STIG/IAVA, OWASP, GitHub
+  advisories), increase top-K and rely on Reranking to maintain precision
 
 Implementable as a weighted scoring expression in pgvector alongside the
 existing similarity query.
