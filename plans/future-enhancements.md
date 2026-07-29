@@ -50,7 +50,7 @@ Categorization) decision factors and CVE-Record-Format **affected** data inside
 the CVE API as of **2026-06-17**. SSVC answers *"how urgently should I act?"* —
 the three CISA factors `exploitation` (none/poc/active), `automatable` (yes/no),
 and `technicalImpact` (partial/total) — and complements CVSS the same way EPSS
-will: severity is not the same as priority.
+does: severity is not the same as priority.
 
 Shipped through Tier 1: the SSVC factors are promoted to typed, indexed columns
 on `nvd_vulnerabilities`, wired into both NVD loaders (with a `--backfill-ssvc`
@@ -63,7 +63,7 @@ ranking and gives the Composite Risk Score and retrieval scoring a second
 prioritization signal to blend alongside EPSS. Remaining follow-on is **Tier 2**
 — promoting `affected` vendor/product/version *ranges* to structured columns.
 
-### EPSS Score Ingestion ✅ *(plan: [epss-score-integration.md](epss-score-integration.md); docs: [epss-integration.md](../docs/epss-integration.md))*
+### EPSS Score Ingestion ✅ *(PR [#133](https://github.com/jeffhoek/vulncopilot/pull/133); plan: [epss-score-integration.md](epss-score-integration.md); docs: [epss-integration.md](../docs/epss-integration.md))*
 
 Loads the [Exploit Prediction Scoring System](https://www.first.org/epss/) daily
 feed from FIRST.org into an `epss_scores` table keyed by CVE ID. EPSS gives
@@ -96,35 +96,55 @@ Notes worth carrying forward:
 
 ## High Priority — Production-Readiness
 
-### Composite Risk Score Tool ⬅️ *next up*
+### Composite Risk Score Tool ⬅️ *next up — unblocked*
+
+**All four input signals are now in Postgres.** With EPSS shipped, this is the
+last piece that turns four independent columns into one answer to the question
+analysts actually ask: *what do I patch first?*
 
 A third agent tool, `risk_score(cve_id)`, that returns a single 0–100 number
 plus a structured breakdown of contributing factors. Internally a SQL query
-joining `nvd_cves`, `kev_catalog`, `epss_scores`, and `cwe_definitions`, plus a
-pure Python function that blends:
+joining `nvd_vulnerabilities`, `kev_vulnerabilities`, `epss_scores`, and
+`cwe_definitions`, plus a pure Python function that blends:
 
-- CVSS base score (normalized 0–1), weight ~0.30
-- EPSS probability, weight ~0.30
-- KEV listed → flat +0.25 bonus
-- KEV ransomware-use → flat +0.10 bonus
-- SSVC factors (now ingested) — `exploitation=active` and `automatable=yes`
-  reinforce the EPSS/KEV signal; usable as a small weighted bump or as an
-  explainability input in the rationale
-- CWE class severity (memory corruption / injection > info-disclosure / DoS),
-  small static mapping, weight ~0.05
+| Signal | Source | Weight |
+| --- | --- | --- |
+| CVSS base score, normalized 0–1 | `COALESCE(cvss_v31_score, cvss_v2_score) / 10` | 0.25 |
+| EPSS probability | `epss_scores.probability` | 0.30 |
+| KEV listed | presence in `kev_vulnerabilities` | +0.20 flat |
+| KEV ransomware use | `known_ransomware_campaign_use = 'Known'` | +0.10 flat |
+| SSVC urgency | `ssvc_exploitation=active` (+0.06), `automatable=yes` (+0.02), `technical_impact=total` (+0.02) | up to +0.10 |
+| CWE class severity | static map over `cwes[]` (memory corruption / injection > info-disclosure / DoS) | 0.05 |
+
+Sums to 1.0 at maximum, ×100 for the reported score. Bands: 0–39 low, 40–69
+moderate, 70–84 high, 85–100 critical.
 
 Returned shape: `{cve_id, score, band, components: {...}, rationale}` so the
 agent can both rank and explain. Also exposed as a SQL view (`v_cve_risk`) so
 the existing `query` tool can `ORDER BY risk_score DESC` for bulk questions.
 
-This is the natural high-leverage payoff once EPSS is loaded: every API-only
-competitor computes this with live fan-out per CVE; with everything pre-joined
-in Postgres, the whole dataset ranks in milliseconds.
+Implementation notes carried over from EPSS:
+
+- **`LEFT JOIN epss_scores`, always** — the row sets only partially overlap
+  (EPSS skips REJECTED/RESERVED CVEs and can score a CVE before our NVD sync
+  sees it). A missing EPSS row contributes 0, not NULL — the score must never
+  come back NULL because one signal is absent.
+- **Coalesce CVSS versions** — older CVEs carry only `cvss_v2_score`; treating
+  a NULL v3.1 as "no severity" silently zeroes the largest weight.
+- **`previous_probability` is free movement data** — a CVE whose EPSS jumped
+  this week is a stronger call to action than a flat one at the same score.
+  Worth surfacing in `rationale` even if it stays out of the weighted sum.
+
+This is the natural high-leverage payoff now that EPSS is loaded: every
+API-only competitor computes this with live fan-out per CVE; with everything
+pre-joined in Postgres, the whole dataset ranks in milliseconds.
 
 Tuning: ship with fixed weights, log components via Langfuse, revisit once
 real usage data shows which CVEs analysts actually act on.
 
-**Depends on**: EPSS Score Ingestion above.
+**Unblocks**: Software Inventory Matching (rank only the CVEs that apply),
+Alerting (threshold on risk band rather than raw CVSS), and Retrieval Scoring
+Beyond Vector Similarity (reuse `v_cve_risk` as the ranking weight).
 
 ### Software Inventory Matching
 
@@ -308,15 +328,15 @@ query phrasing:
 
 - **KEV status** — known-exploited CVEs rank above non-KEV results at equal
   similarity
-- **EPSS score** — once ingested (see High Priority), use exploitation
-  likelihood as a retrieval weight
+- **EPSS score** — now ingested (see Recently Shipped), use `probability` as a
+  retrieval weight via a `LEFT JOIN epss_scores`
 - **SSVC factors** — now ingested (see Recently Shipped), boost
   `exploitation=active` / `automatable=yes` records as a triage signal
 - **Recency** — `date_added` to KEV or NVD publish date as a decay factor
 - **User feedback** — upvoted CVEs gain a small boost (ties into User Feedback
   Loop)
-- **Top-K tuning** — as more datasets are added (STIG, EPSS, GitHub advisories),
-  increase top-K and rely on Reranking to maintain precision
+- **Top-K tuning** — as more datasets are added (STIG/IAVA, OWASP, GitHub
+  advisories), increase top-K and rely on Reranking to maintain precision
 
 Implementable as a weighted scoring expression in pgvector alongside the
 existing similarity query.
