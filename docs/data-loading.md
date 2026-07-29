@@ -147,6 +147,8 @@ NVD modifies thousands of CVEs per week for routine metadata refreshes (CVSS res
 
 For large syncs (roughly monthly or after a long gap), drop the index before running and rebuild it afterward. **Upgrade to Medium compute before the rebuild** — Micro cannot allocate enough shared memory for a usable `maintenance_work_mem` setting, making the build extremely slow. Downgrade back to Micro when done.
 
+> **Running this in the cloud instead of a laptop?** These same catch-ups (and the HNSW drop/rebuild + schedule-disable steps) are driven from Azure DevOps via the manual [ETL pipeline](etl-pipeline.md), which starts a long-timeout Container Apps Job — no `caffeinate`, no laptop.
+
 ```sql
 -- Before ETL (run in Supabase SQL editor or psql)
 DROP INDEX IF EXISTS nvd_embedding_idx;

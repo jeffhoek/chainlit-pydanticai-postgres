@@ -9,6 +9,10 @@ trigger:
       # EKS-only artifacts — iterating on these should not fire the Azure pipeline
       - k8s/**
       - .github/**
+      # The manual ETL pipeline is self-contained and dispatch-only; editing it must
+      # not trigger a full build+deploy. (Its bicep — infra/** — is NOT excluded, so
+      # changes to the catch-up job definition still deploy through this pipeline.)
+      - azure-pipelines-etl.yml
 
 pr: none
 

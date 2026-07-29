@@ -36,6 +36,9 @@ param etlCronExpression string = '0 6 * * 1'
 @description('Recipient address(es) for the ETL results email (comma-separated). Inject from a pipeline variable; empty disables the email. Do not commit a real address.')
 param etlEmailTo string = ''
 
+@description('Max seconds the ad-hoc catch-up job may run before termination. Default 10h — large one-off backfills are long.')
+param etlCatchupReplicaTimeout int = 36000
+
 @description('Canonical public URL. Set to the custom domain once live (e.g. \'https://vulncopilot.org\'); empty falls back to the azurewebsites.net host. See plans/custom-domain-cloudflare.md.')
 param publicUrl string = ''
 
@@ -57,6 +60,7 @@ var appServiceName = 'app-${appName}-${environment}'
 var logAnalyticsName = 'log-${appName}-${environment}'
 var managedEnvironmentName = 'cae-${appName}-${environment}'
 var etlJobName = 'job-${appName}-etl-${environment}'
+var etlCatchupJobName = 'job-${appName}-etl-catchup-${environment}'
 var communicationServiceName = 'acs-${appName}-${environment}'
 var emailServiceName = 'email-${appName}-${environment}'
 
@@ -167,8 +171,30 @@ module etlJob 'modules/etl-job.bicep' = {
   }
 }
 
+// Step 9: Ad-hoc ETL catch-up job (Manual-trigger Container Apps Job) — started
+// on demand by azure-pipelines-etl.yml for large one-off backlogs. Reuses the
+// managed environment stood up by the scheduled job, so it depends on it.
+module etlCatchupJob 'modules/etl-catchup-job.bicep' = {
+  name: 'etlCatchupJob'
+  params: {
+    location: location
+    managedEnvironmentId: etlJob.outputs.managedEnvironmentId
+    jobName: etlCatchupJobName
+    identityId: identity.outputs.identityId
+    identityClientId: identity.outputs.clientId
+    acrLoginServer: acr.outputs.loginServer
+    keyVaultName: keyVaultName
+    replicaTimeout: etlCatchupReplicaTimeout
+    acsEndpoint: email.outputs.acsEndpoint
+    acsSender: email.outputs.senderAddress
+    emailTo: etlEmailTo
+    tags: tags
+  }
+}
+
 output appServiceUrl string = 'https://${appService.outputs.defaultHostName}'
 output acrLoginServer string = acr.outputs.loginServer
 output keyVaultUri string = keyVault.outputs.keyVaultUri
 output etlJobName string = etlJob.outputs.jobName
+output etlCatchupJobName string = etlCatchupJob.outputs.jobName
 output etlEmailSender string = email.outputs.senderAddress
