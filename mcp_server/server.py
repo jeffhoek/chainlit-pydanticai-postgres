@@ -43,6 +43,12 @@ def set_mcp_context(pool: asyncpg.Pool, openai_client: AsyncOpenAI) -> None:
 async def retrieve(query: str) -> str:
     """Retrieve relevant context from the KEV/NVD knowledge base using semantic search.
 
+    Use this for conceptual or thematic questions ("tell me about Log4j",
+    "prompt injection vulns") where document excerpts are what you want.
+    For counts, top-N, date filters, grouping, JOINs, or specific CVE ID
+    lookups, use the `query` tool instead — semantic search returns a fixed
+    top-k of similar text, not exact or complete rows.
+
     Args:
         query: Natural language search query (e.g. "log4j remote code execution").
 
@@ -66,8 +72,70 @@ async def retrieve(query: str) -> str:
 async def query(sql: str) -> str:
     """Execute a read-only SQL SELECT query against the KEV/NVD database.
 
+    Use this for counts, top-N, date filters, grouping, listing, JOINs across
+    tables, and specific CVE ID lookups. For a CVE ID lookup, query BOTH
+    kev_vulnerabilities AND nvd_vulnerabilities before concluding a CVE is
+    absent — a CVE may exist in NVD without appearing in KEV.
+
+    Schema (mirrors config.py's system prompt — keep the two in sync):
+
+    TABLE kev_vulnerabilities (
+      cve_id VARCHAR(20),
+      vendor_project TEXT,
+      product TEXT,
+      vulnerability_name TEXT,
+      short_description TEXT,
+      required_action TEXT,
+      notes TEXT,
+      date_added DATE,
+      due_date DATE,
+      known_ransomware_campaign_use VARCHAR(20),
+      cwes TEXT[]
+    )
+
+    TABLE nvd_vulnerabilities (
+      cve_id VARCHAR(20),
+      description TEXT,
+      cvss_v31_score NUMERIC(3,1),
+      cvss_v31_severity VARCHAR(10),
+      cvss_v31_vector TEXT,
+      cvss_v2_score NUMERIC(3,1),
+      cvss_v2_severity VARCHAR(10),
+      cwes TEXT[],
+      affected_products TEXT[],
+      reference_urls TEXT[],
+      published DATE,
+      last_modified DATE,
+      ssvc_exploitation VARCHAR(8),     -- none|poc|active (CISA SSVC decision factor)
+      ssvc_automatable VARCHAR(4),      -- yes|no
+      ssvc_technical_impact VARCHAR(8), -- partial|total
+      ssvc_decision VARCHAR(8),         -- Act|Attend|Track|Track* (usually NULL today)
+      ssvc_version VARCHAR(8),          -- SSVC schema version, e.g. '2.0.3'
+      raw_json JSONB                    -- full NVD API response; query with -> and ->>
+    )
+
+    TABLE cwe_definitions (
+      cwe_id VARCHAR(20),       -- e.g. 'CWE-79'
+      name TEXT,                -- human-readable weakness name
+      abstraction VARCHAR(20),  -- Pillar, Class, Base, Variant, Compound
+      description TEXT,
+      url TEXT
+    )
+
+    JOIN kev_vulnerabilities and nvd_vulnerabilities on cve_id. Resolve CWE IDs
+    to names via cwe_id = ANY(nvd_vulnerabilities.cwes) or
+    cwe_id = ANY(kev_vulnerabilities.cwes).
+
+    SSVC (prioritization — complements CVSS; severity != urgency):
+    - ssvc_exploitation: none < poc < active (active = exploited in the wild;
+      KEV-listed CVEs are typically 'active').
+    - ssvc_automatable: yes|no (whether attackers can automate at scale).
+    - ssvc_technical_impact: partial|total.
+    Top remediation priority = ssvc_exploitation='active' AND
+    ssvc_automatable='yes' AND ssvc_technical_impact='total'.
+
     Args:
-        sql: A SELECT statement against kev_vulnerabilities or nvd_vulnerabilities.
+        sql: A read-only SELECT statement against the tables above.
 
     Returns:
         Query results as a formatted table, or an error message.
