@@ -161,11 +161,17 @@ ORDER BY e.probability DESC;
 ### Severity/likelihood mismatch: scary-looking but unlikely
 
 ```sql
-SELECT n.cve_id, n.cvss_v31_score, e.probability
+SELECT n.cve_id, COALESCE(n.cvss_v31_score, n.cvss_v2_score) AS severity, e.probability
 FROM nvd_vulnerabilities n
 LEFT JOIN epss_scores e ON e.cve_id = n.cve_id
-WHERE n.cvss_v31_score >= 9.0 AND (e.probability < 0.01 OR e.probability IS NULL);
+WHERE COALESCE(n.cvss_v31_score, n.cvss_v2_score) >= 9.0
+  AND (e.probability < 0.01 OR e.probability IS NULL);
 ```
+
+The `COALESCE` matters: CVSS v3.1 only exists for CVEs from ~2015 onward, while EPSS scores
+the corpus back to 1999. Filtering on `cvss_v31_score` alone silently drops every pre-2015 CVE
+— which is most of the high-EPSS long tail (`CVE-2001-0500`, the IIS overflow behind Code Red,
+scores ~0.97 with no v3.1 record at all).
 
 ### Biggest movers since the last publication
 

@@ -289,11 +289,14 @@ LEFT JOIN kev_vulnerabilities k ON k.cve_id = n.cve_id
 WHERE e.probability >= 0.5 AND k.cve_id IS NULL
 ORDER BY e.probability DESC;
 
--- Severity/likelihood mismatch: scary-looking but unlikely
-SELECT n.cve_id, n.cvss_v31_score, e.probability
+-- Severity/likelihood mismatch: scary-looking but unlikely.
+-- COALESCE because CVSS v3.1 starts ~2015 while EPSS scores back to 1999 —
+-- filtering on cvss_v31_score alone drops every pre-2015 CVE.
+SELECT n.cve_id, COALESCE(n.cvss_v31_score, n.cvss_v2_score) AS severity, e.probability
 FROM nvd_vulnerabilities n
 LEFT JOIN epss_scores e ON e.cve_id = n.cve_id
-WHERE n.cvss_v31_score >= 9.0 AND (e.probability < 0.01 OR e.probability IS NULL);
+WHERE COALESCE(n.cvss_v31_score, n.cvss_v2_score) >= 9.0
+  AND (e.probability < 0.01 OR e.probability IS NULL);
 
 -- Biggest movers since the last EPSS publication
 SELECT cve_id, previous_probability, probability,

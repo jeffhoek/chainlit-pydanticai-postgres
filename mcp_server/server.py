@@ -156,6 +156,11 @@ async def query(sql: str) -> str:
       >= 0.1 elevated, percentile >= 0.95 top-5%. Report percentile alongside a
       raw probability. Scores refresh daily — cite scored_at.
     - High EPSS + absent from KEV is early warning, not a contradiction.
+    - CVSS v3.1 only exists for CVEs from ~2015 onward; older records carry
+      cvss_v2_score alone, while EPSS scores the corpus back to 1999. A severity
+      filter written against cvss_v31_score therefore drops every pre-2015 CVE
+      from an EPSS comparison — use COALESCE(cvss_v31_score, cvss_v2_score)
+      whenever a severity threshold is combined with EPSS.
 
     Args:
         sql: A read-only SELECT statement against the tables above.
