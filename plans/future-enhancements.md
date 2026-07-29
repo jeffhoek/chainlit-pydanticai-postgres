@@ -43,36 +43,29 @@ The remaining gap is the **data freshness indicator** in the UI / API
 responses ("KEV last synced: 4 hours ago") — the scheduling half is done; the
 surfacing half is not.
 
-## High Priority — Production-Readiness
-
-### SSVC Integration *(plan: [ssvc-affected-integration.md](ssvc-affected-integration.md))*
+### SSVC Integration ✅ *(PR [#126](https://github.com/jeffhoek/vulncopilot/pull/126); plan: [ssvc-affected-integration.md](ssvc-affected-integration.md))*
 
 NVD began publishing CISA-ADP **SSVC** (Stakeholder-Specific Vulnerability
 Categorization) decision factors and CVE-Record-Format **affected** data inside
 the CVE API as of **2026-06-17**. SSVC answers *"how urgently should I act?"* —
 the three CISA factors `exploitation` (none/poc/active), `automatable` (yes/no),
 and `technicalImpact` (partial/total) — and complements CVSS the same way EPSS
-does: severity is not the same as priority.
+will: severity is not the same as priority.
 
-Top priority among the new data sources for three reasons: it's the freshest
-(shipped days ago), it's nearly free to adopt (the entire `cve` object already
-lands in `nvd_vulnerabilities.raw_json`, so an incremental re-sync captures SSVC
-with zero schema changes), and it carries **operational urgency** — the June-17
-deployment modified ~95% of all CVE records, so the storm re-sync needs to be
-sequenced carefully to avoid colliding with the scheduled ETL job.
+Shipped through Tier 1: the SSVC factors are promoted to typed, indexed columns
+on `nvd_vulnerabilities`, wired into both NVD loaders (with a `--backfill-ssvc`
+mode to populate them from existing `raw_json`), surfaced alongside affected
+vendor/product in the embedded `content`, and taught to the agent via the system
+prompt plus SSVC quick-query buttons (PR
+[#130](https://github.com/jeffhoek/vulncopilot/pull/130)). This unlocks the
+"active + automatable + total technical impact = top remediation priority"
+ranking and gives the Composite Risk Score and retrieval scoring a second
+prioritization signal to blend alongside EPSS. Remaining follow-on is **Tier 2**
+— promoting `affected` vendor/product/version *ranges* to structured columns.
 
-- **Tier 0 (no code)**: re-sync, teach the system prompt the `raw_json` JSONB
-  paths. Minimum viable SSVC support.
-- **Tier 1 (recommended)**: promote the low-cardinality SSVC factors to typed,
-  indexed columns for clean filtering/aggregation; surface SSVC + affected
-  vendor/product in the embedded `content`.
-- **Tier 2 (later)**: promote `affected` vendor/product/version ranges to
-  structured columns.
-- **Unlocks**: "active + automatable + total technical impact = top remediation
-  priority" ranking, and a second prioritization signal for the Composite Risk
-  Score and retrieval scoring alongside EPSS.
+## High Priority — Production-Readiness
 
-### EPSS Score Ingestion
+### EPSS Score Ingestion ⬅️ *next up*
 
 Load the [Exploit Prediction Scoring System](https://www.first.org/epss/) daily
 feed from FIRST.org into a new `epss_scores` table keyed by CVE ID. EPSS gives
@@ -112,7 +105,7 @@ pure Python function that blends:
 - EPSS probability, weight ~0.30
 - KEV listed → flat +0.25 bonus
 - KEV ransomware-use → flat +0.10 bonus
-- SSVC factors (once ingested) — `exploitation=active` and `automatable=yes`
+- SSVC factors (now ingested) — `exploitation=active` and `automatable=yes`
   reinforce the EPSS/KEV signal; usable as a small weighted bump or as an
   explainability input in the rationale
 - CWE class severity (memory corruption / injection > info-disclosure / DoS),
@@ -315,7 +308,7 @@ query phrasing:
   similarity
 - **EPSS score** — once ingested (see High Priority), use exploitation
   likelihood as a retrieval weight
-- **SSVC factors** — once ingested (see High Priority), boost
+- **SSVC factors** — now ingested (see Recently Shipped), boost
   `exploitation=active` / `automatable=yes` records as a triage signal
 - **Recency** — `date_added` to KEV or NVD publish date as a decay factor
 - **User feedback** — upvoted CVEs gain a small boost (ties into User Feedback
