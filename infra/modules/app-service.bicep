@@ -94,11 +94,14 @@ var actionButtons = join([
   'Reference URLs for CVE-2025-53770 (SharePoint ToolShell)'
   'Top 10 AI-related CVEs in 2026 by CVSS score'
   'LLM prompt injection vulns'
+  'typo squatting'
   'Anthropic Claude vulns'
-  'OpenClaw'
   'VPN and remote access vulns'
   'Top vendors in KEV'
   'Which weakness types appear most in KEV?'
+  'Top actively-exploited, automatable, total-impact CVEs'
+  'How many CVEs are in each SSVC exploitation state?'
+  'CVSS 10.0 CVEs not yet exploited (SSVC none)'
 ], '","')
 
 // FastMCP 3.x enables DNS-rebinding Host validation by default and only allows
