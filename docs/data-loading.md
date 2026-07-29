@@ -52,7 +52,7 @@ uv run python -c "from rag.database import init_db; import asyncio; asyncio.run(
 
 ## ETL Scripts
 
-There are four ETL scripts, each targeting a different scope:
+There are five ETL scripts, each targeting a different scope:
 
 | Script | Scope | Records | Use case |
 |---|---|---|---|
@@ -60,6 +60,7 @@ There are four ETL scripts, each targeting a different scope:
 | `scripts/load_nvd.py` | NVD data for KEV CVEs only | ~1,500 | Enriches KEV entries with CVSS scores, severity, affected products |
 | `scripts/load_nvd_full.py` | Entire NVD database | ~280,000 | Full NVD corpus for broader vulnerability research |
 | `scripts/load_cwe.py` | MITRE CWE definitions | ~900 | Resolves opaque CWE IDs to human-readable weakness names/descriptions |
+| `scripts/load_epss.py` | FIRST.org EPSS daily scores | ~353,000 | Exploitation-likelihood signal for prioritization; leading indicator to KEV |
 
 ### 1. Load CISA KEV data
 
@@ -195,6 +196,16 @@ uv run python scripts/load_cwe.py
 ```
 
 No API key or authentication required. The script is idempotent — re-running pulls the latest CWE release (published 2–3 times per year) and upserts any changes. See [cwe-integration.md](cwe-integration.md) for schema and example join queries.
+
+### 5. Load EPSS scores (optional)
+
+Loads FIRST.org's daily exploitation-likelihood scores into `epss_scores`, giving each CVE a probability of being exploited within 30 days plus a percentile rank:
+
+```bash
+uv run python scripts/load_epss.py
+```
+
+No API key required, and fast — ~353k rows in a couple of seconds via a bulk staging upsert. The feed refreshes daily, so this is worth running on the same schedule as KEV. Re-running within the same publication is idempotent. See [epss-integration.md](epss-integration.md) for schema, the redirect/format gotchas, and prioritization query examples.
 
 ## NVD API Key
 

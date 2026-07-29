@@ -122,6 +122,16 @@ async def query(sql: str) -> str:
       url TEXT
     )
 
+    TABLE epss_scores (
+      cve_id VARCHAR(20),
+      probability NUMERIC(6,5),           -- 0-1, chance of exploitation in next 30 days
+      percentile NUMERIC(6,5),            -- rank vs all scored CVEs
+      scored_at DATE,                     -- date of this EPSS publication
+      model_version VARCHAR(16),
+      previous_probability NUMERIC(6,5),  -- prior publication's score (movement queries)
+      previous_scored_at DATE
+    )
+
     JOIN kev_vulnerabilities and nvd_vulnerabilities on cve_id. Resolve CWE IDs
     to names via cwe_id = ANY(nvd_vulnerabilities.cwes) or
     cwe_id = ANY(kev_vulnerabilities.cwes).
@@ -133,6 +143,24 @@ async def query(sql: str) -> str:
     - ssvc_technical_impact: partial|total.
     Top remediation priority = ssvc_exploitation='active' AND
     ssvc_automatable='yes' AND ssvc_technical_impact='total'.
+
+    EPSS (exploitation likelihood — the leading indicator to KEV's lagging one):
+    - Four distinct signals: cvss_v31_score = severity, epss_scores.probability =
+      likelihood, KEV listing = confirmed exploitation, ssvc_* = urgency. Rank by
+      the one the question actually asks for.
+    - ALWAYS LEFT JOIN epss_scores. Coverage is partial (EPSS skips
+      REJECTED/RESERVED CVEs and may score a CVE before the NVD sync sees it), and
+      a missing row means UNSCORED, never zero risk — an INNER JOIN silently drops
+      those CVEs from rankings.
+    - Heavily skewed: most CVEs are below 0.01. Bands: probability >= 0.5 high,
+      >= 0.1 elevated, percentile >= 0.95 top-5%. Report percentile alongside a
+      raw probability. Scores refresh daily — cite scored_at.
+    - High EPSS + absent from KEV is early warning, not a contradiction.
+    - CVSS v3.1 only exists for CVEs from ~2015 onward; older records carry
+      cvss_v2_score alone, while EPSS scores the corpus back to 1999. A severity
+      filter written against cvss_v31_score therefore drops every pre-2015 CVE
+      from an EPSS comparison — use COALESCE(cvss_v31_score, cvss_v2_score)
+      whenever a severity threshold is combined with EPSS.
 
     Args:
         sql: A read-only SELECT statement against the tables above.

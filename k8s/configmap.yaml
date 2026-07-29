@@ -45,7 +45,10 @@ data:
     "Which weakness types appear most in KEV?",
     "Top actively-exploited, automatable, total-impact CVEs",
     "How many CVEs are in each SSVC exploitation state?",
-    "CVSS 10.0 CVEs not yet exploited (SSVC none)"]
+    "CVSS 10.0 CVEs not yet exploited (SSVC none)",
+    "High-EPSS CVEs not yet listed in KEV",
+    "CVSS 9+ CVEs with low exploitation likelihood",
+    "Biggest EPSS movers since the last update"]
   # Logfire tracing (docs/observability.md). Requires LOGFIRE_TOKEN in the
   # rag-secrets secret (synced from SSM /rag/LOGFIRE_TOKEN via ESO).
   LOGFIRE_ENABLED: "true"

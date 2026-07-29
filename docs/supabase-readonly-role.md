@@ -5,7 +5,7 @@ Create dedicated PostgreSQL roles for the live app and ETL processes, keeping th
 | Role | Purpose | Privileges |
 |---|---|---|
 | `postgres` (admin) | Schema setup and migrations | Full DDL + DML |
-| `app_etl` (new) | ETL scripts (`load_kev.py`, `load_nvd.py`, `load_cwe.py`) | SELECT, INSERT, UPDATE — no DELETE, no DDL |
+| `app_etl` (new) | ETL scripts (`load_kev.py`, `load_nvd.py`, `load_cwe.py`, `load_epss.py`) | SELECT, INSERT, UPDATE — no DELETE, no DDL |
 | `app_readonly` (new) | Live app at runtime | SELECT only |
 
 No role can do what the other cannot — a compromised ETL credential cannot wipe data, and a compromised app credential cannot modify data at all.
@@ -47,6 +47,7 @@ GRANT SELECT ON kev_vulnerabilities TO app_readonly;
 GRANT SELECT ON nvd_vulnerabilities TO app_readonly;
 GRANT SELECT ON cwe_definitions TO app_readonly;
 GRANT SELECT ON etl_runs TO app_readonly;
+GRANT SELECT ON epss_scores TO app_readonly;
 ```
 
 Only these tables are granted — no wildcard `ALL TABLES`. Any new table added later requires an explicit grant before `app_readonly` can read it. ALTER DEFAULT PRIVILEGES is an optional way to automate this for future tables:
@@ -149,6 +150,7 @@ GRANT USAGE ON SCHEMA public TO app_etl;
 GRANT SELECT, INSERT, UPDATE ON kev_vulnerabilities TO app_etl;
 GRANT SELECT, INSERT, UPDATE ON nvd_vulnerabilities TO app_etl;
 GRANT SELECT, INSERT, UPDATE ON cwe_definitions TO app_etl;
+GRANT SELECT, INSERT, UPDATE ON epss_scores TO app_etl;
 -- etl_runs is append-only: the ETL job only ever inserts a run record.
 GRANT INSERT ON etl_runs TO app_etl;
 ```
@@ -159,7 +161,7 @@ The `vector` type used for embeddings is provided by the pgvector extension (ins
 
 ### Step 10 — Grant sequence usage
 
-The `id` serial columns require sequence access for INSERTs. `cwe_definitions` uses a natural VARCHAR primary key and has no serial sequence.
+The `id` serial columns require sequence access for INSERTs. `cwe_definitions` and `epss_scores` use natural VARCHAR primary keys and have no serial sequence.
 
 ```sql
 GRANT USAGE ON SEQUENCE kev_vulnerabilities_id_seq TO app_etl;

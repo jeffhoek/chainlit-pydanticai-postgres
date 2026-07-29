@@ -5,9 +5,10 @@ Runs each loader in-process and collects a structured LoaderReport (summary line
 Running in-process (rather than as subprocesses) streams each loader's logs live
 to the job log and lets the email render real metrics instead of grepping stdout.
 
-The loaders are independent — the full NVD incremental writes nvd_vulnerabilities
-and the KEV catalog writes kev_vulnerabilities — so every step runs regardless of
-whether another fails, and their order doesn't matter.
+The loaders are independent — the full NVD incremental writes nvd_vulnerabilities,
+the KEV catalog writes kev_vulnerabilities, and EPSS writes epss_scores — so every
+step runs regardless of whether another fails, and their order doesn't matter.
+EPSS is listed last only to keep the long-pole NVD sync first.
 
 Email is best-effort and optional: if the ACS_* / ETL_EMAIL_TO env vars are unset
 (e.g. local runs), the email step is skipped. The process exit code reflects the
@@ -41,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 STEPS: list[tuple[str, str]] = [
     ("NVD full incremental", "scripts.load_nvd_full:run_incremental"),
     ("KEV catalog", "scripts.load_kev:run"),
+    ("EPSS scores", "scripts.load_epss:run"),
 ]
 
 
@@ -84,8 +86,8 @@ def run_pipeline(steps: list[tuple[str, str]], runner=run_step) -> list[dict]:
     """Run every step, returning one result dict per step.
 
     The loaders are independent (NVD full -> nvd_vulnerabilities, KEV ->
-    kev_vulnerabilities), so a failure in one must not skip the other — both
-    always run and the summary reports each outcome.
+    kev_vulnerabilities, EPSS -> epss_scores), so a failure in one must not skip
+    the others — all always run and the summary reports each outcome.
     """
     return [runner(label, target) for label, target in steps]
 
