@@ -166,6 +166,10 @@ Update [docs/nvd-integration.md](docs/nvd-integration.md) to document the new co
 
 The June-17 storm modified ~95% of records, so a normal incremental run's **Phase 2** ([scripts/load_nvd_full.py:533](scripts/load_nvd_full.py:533)) will try to re-pull ~all CVEs while the API is degraded and the modified feed is oversized (through ~June 25).
 
+> **Root cause — why the scheduled job never caught up, and why you MUST pass `--since`.** `incremental_sync` derives its start date from `MAX(last_modified)` in the DB. Once any run (scheduled or manual) ingests even a slice of the storm, that high-water mark jumps *past* the un-ingested backlog, so every subsequent run starts after the gap and the backlog is never revisited. The scheduled ~12h job kept doing this to itself. **The only fix is to pass an explicit `--since <pre-storm date>`** (`2026-06-15`, a day before the June-16 deploy window) to force a re-pull of the whole window. A code fix so incremental runs detect and re-pull such a backlog automatically is tracked separately.
+
+> **Baseline to expect.** A full catch-up of `--incremental --since 2026-06-15 --skip-embeddings` synced **366,846 CVEs in 70m49s** on Supabase **Large (8 GB / 2-core)** with the HNSW index dropped. Use this as the yardstick for the run below — if a sync is running an order of magnitude slower, the HNSW index is probably still present (see step 3) or compute is undersized (step 2).
+
 **Prerequisite — the five SSVC columns must exist in the target database before the ETL runs.** The upserts now reference `ssvc_exploitation … ssvc_version`, so a sync against a database that lacks them will error. The columns ship in `SCHEMA_SQL` ([rag/database.py](rag/database.py)), but the loaders connect with a plain `asyncpg.connect` and do **not** apply `SCHEMA_SQL` (only `init_db()` does), and the production app runs `DB_INIT_SCHEMA=false` (read-only role, no DDL — see [docs/supabase-readonly-role.md](docs/supabase-readonly-role.md)). So apply the migration once with the **admin** connection before starting, and confirm:
 
 ```bash
@@ -191,35 +195,59 @@ CREATE INDEX IF NOT EXISTS nvd_ssvc_decision_idx     ON nvd_vulnerabilities (ssv
 SQL
 ```
 
-Recommended sequence:
+### Large re-sync runbook (ordered)
+
+This is the followable sequence for any large NVD catch-up, storm or not. The two big levers are **drop the HNSW index** (step 3/6, ~5–10×) and **bump RAM** (step 2); everything else is about not colliding with the scheduled job and not paying for embeddings you don't need.
 
 1. ~~**Deploy the exponential-backoff PR first.**~~ **Done — merged in [PR #93](https://github.com/jeffhoek/vulncopilot/pull/93).** This replaced the old fixed 10–30s retry sleeps ([scripts/load_nvd_full.py:199](scripts/load_nvd_full.py:199)) that stalled under sustained latency. Prerequisite for finishing the storm sync — satisfied.
-2. **Disable the scheduled Azure ETL job for the duration of the storm sync**, then run the manual catch-up from the laptop with `caffeinate -i`. The storm sync doesn't need to be *fast* — it needs to not **collide** with the automated run. The scheduled Container Apps Job ([infra/modules/etl-job.bicep:82](infra/modules/etl-job.bicep:82), `Schedule` trigger) fires on `etlCronExpression`; the bicep default is weekly (`0 6 * * 1`) but the **deployed** value is currently ~every 12h (overridden via deploy var). Suspend/disable that job before starting and re-enable when done — so a manual run that overruns the 12h window won't overlap a scheduled one.
-   - This makes a **second API key unnecessary** — throughput stops mattering once nothing is racing the sync. (For the record: NVD ties a key to one email and re-requesting with the same email invalidates the first, and NVD doesn't document whether the 50-req/30s limit is per-key or per-IP — so a second key from the same laptop might give zero gain anyway. Not worth pursuing.)
-   - **Disable / re-enable commands** (Container Apps Jobs have no "pause schedule" flag — point the cron at a date that never occurs, then restore it):
 
-     ```bash
-     # Identify the job + its resource group
-     az containerapp job list -o table          # note the ETL job name + RG
-     RG=<resource-group>
-     JOB=<etl-job-name>
+2. **Prep: bump Supabase compute, and disable the scheduled Azure job.**
+   - **Bump compute to Large (8 GB), scaling RAM not cores.** The working set — a large HNSW index plus the heap — doesn't fit the small tiers, so more RAM means fewer IO cache-miss stalls. Cores don't help: Medium and Large are both 2-core and the ETL is a single stream, so paying for cores buys nothing. **Scale back down to the steady-state tier in step 7.**
+   - **Disable the scheduled Azure ETL job for the duration**, then run the manual catch-up from the laptop with `caffeinate -i`. The storm sync doesn't need to be *fast* — it needs to not **collide** with the automated run. The scheduled Container Apps Job ([infra/modules/etl-job.bicep:82](infra/modules/etl-job.bicep:82), `Schedule` trigger) fires on `etlCronExpression`; the bicep default is weekly (`0 6 * * 1`) but the **deployed** value is currently ~every 12h (overridden via deploy var). Suspend it before starting and re-enable when done, so a manual run that overruns the 12h window won't overlap a scheduled one.
+     - **A `containerapp job update --cron` edit does *not* survive an ADO/bicep deploy** — a deploy re-applies `etlCronExpression` and silently re-enables the schedule. If a deploy might land during your run, either hold the deploy or set `etlCronExpression` to the disabled value in the deploy vars too. Always re-check the live cron (step 7) after any deploy that touched infra.
+     - This makes a **second API key unnecessary** — throughput stops mattering once nothing is racing the sync. (For the record: NVD ties a key to one email and re-requesting with the same email invalidates the first, and NVD doesn't document whether the 50-req/30s limit is per-key or per-IP — so a second key from the same laptop might give zero gain anyway. Not worth pursuing.)
+     - **Disable / re-enable commands** (Container Apps Jobs have no "pause schedule" flag — point the cron at a date that never occurs, then restore it):
 
-     # 1. RECORD the current cron first — the live value is overridden (~12h),
-     #    NOT the bicep weekly default, so capture it to restore exactly.
-     az containerapp job show -g "$RG" -n "$JOB" \
-       --query "properties.configuration.scheduleTriggerConfig.cronExpression" -o tsv
+       ```bash
+       # Identify the job + its resource group
+       az containerapp job list -o table          # note the ETL job name + RG
+       RG=<resource-group>
+       JOB=<etl-job-name>
 
-     # 2. DISABLE — "Feb 31" never exists, so the trigger never fires.
-     az containerapp job update -g "$RG" -n "$JOB" --cron-expression "0 0 31 2 *"
+       # 1. RECORD the current cron first — the live value is overridden (~12h),
+       #    NOT the bicep weekly default, so capture it to restore exactly.
+       az containerapp job show -g "$RG" -n "$JOB" \
+         --query "properties.configuration.scheduleTriggerConfig.cronExpression" -o tsv
 
-     # 3. RE-ENABLE — restore the value recorded in step 1 (example: every 12h).
-     az containerapp job update -g "$RG" -n "$JOB" --cron-expression "0 */12 * * *"
-     ```
+       # 2. DISABLE — "Feb 31" never exists, so the trigger never fires.
+       az containerapp job update -g "$RG" -n "$JOB" --cron-expression "0 0 31 2 *"
 
-     Updating the cron does not interrupt a run already in flight, and leaves the job (image, identity, env) otherwise untouched.
-3. Run the storm sync **`--skip-embeddings`** first: `--incremental --since 2026-06-15 --skip-embeddings`. Gets SSVC/affected into `raw_json` fast and cheaply; ~275k embeddings during a degraded window is the wrong time to pay that cost.
-4. **`--backfill-ssvc`** (new mode) to populate the five SSVC columns from `raw_json` — pure SQL/Python, no API.
-5. **Verify, then re-enable the scheduled job.** Confirm the columns populated, then restore the cron from step 2's RE-ENABLE command (do not leave the job disabled):
+       # 3. RE-ENABLE — restore the value recorded above (example: every 12h).
+       az containerapp job update -g "$RG" -n "$JOB" --cron-expression "0 */12 * * *"
+       ```
+
+       Updating the cron does not interrupt a run already in flight, and leaves the job (image, identity, env) otherwise untouched.
+
+3. **Drop the HNSW index — the single biggest lever (~5–10×).** Per-row HNSW maintenance dominates a bulk load. With `--skip-embeddings` the vectors don't change at all, so drop-then-rebuild reproduces an identical index and is **lossless**.
+
+   ```sql
+   DROP INDEX IF EXISTS nvd_embedding_idx;
+   ```
+
+4. **Run the storm sync `--skip-embeddings`:** `--incremental --since 2026-06-15 --skip-embeddings` (see the root-cause note above for why `--since` is mandatory). Gets SSVC/affected into `raw_json` fast and cheaply; paying for ~275k embeddings during a degraded window is the wrong cost to take on. **Baseline: 366,846 CVEs in 70m49s on Large with the index dropped.**
+
+5. **`--backfill-ssvc`** (new mode) to populate the five SSVC columns from `raw_json` — pure SQL/Python, no API.
+
+6. **Rebuild the HNSW index, then `ANALYZE`.** Do the `CREATE INDEX` in **one `psql` session** with `statement_timeout = 0` — the Supabase SQL editor will otherwise time out and roll back a long build partway through. Use `maintenance_work_mem = '2GB'` (usable on Large).
+
+   ```bash
+   caffeinate -i time psql "$DATABASE_URL" -c "SET statement_timeout = 0; SET maintenance_work_mem = '2GB'; CREATE INDEX nvd_embedding_idx ON nvd_vulnerabilities USING hnsw (embedding vector_cosine_ops);"
+   psql "$DATABASE_URL" -c "ANALYZE nvd_vulnerabilities;"
+   ```
+
+   Watch progress via `pg_stat_progress_create_index` (see the HNSW drop/rebuild section in [docs/data-loading.md](../docs/data-loading.md)). Semantic search is unavailable during the rebuild but the app stays up.
+
+7. **Verify, scale compute back down, re-enable the scheduled job.** Confirm the columns populated, restore the steady-state Supabase tier from step 2, and restore the cron from step 2's RE-ENABLE command (do not leave the job disabled). If any deploy landed mid-run, re-check the live cron — a deploy may have re-enabled it.
 
    ```sql
    -- distribution across the decision factor (expect none/poc/active buckets)
@@ -229,7 +257,7 @@ Recommended sequence:
    FROM nvd_vulnerabilities WHERE cve_id = 'CVE-2021-44228';
    ```
 
-6. Optional **targeted re-embed** later: the `content` change is additive, so stale embeddings remain usable. If desired, a `--reembed-since` mode can refresh only storm-touched rows (the existing `--backfill-embeddings` only fills NULLs, so it won't refresh changed content — a new mode is needed).
+8. Optional **targeted re-embed** later: the `content` change is additive, so stale embeddings remain usable. If desired, a `--reembed-since` mode can refresh only storm-touched rows (the existing `--backfill-embeddings` only fills NULLs, so it won't refresh changed content — a new mode is needed). Note this *would* pay the embedding + HNSW-maintenance cost that steps 3–4 deliberately avoided.
 
 > Embedding-refresh nuance: the upsert sets `embedding = COALESCE(EXCLUDED.embedding, existing)` ([scripts/load_nvd_full.py:140](scripts/load_nvd_full.py:140)), so running incremental *with* embeddings would overwrite them — correct but expensive at storm scale. Hence the skip-then-backfill split above.
 
