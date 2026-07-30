@@ -96,7 +96,7 @@ Notes worth carrying forward:
 
 ## High Priority — Production-Readiness
 
-### Composite Risk Score Tool ⬅️ *next up — unblocked*
+### Composite Risk Score Tool ⬅️ *next up — unblocked; plan: [composite-risk-score.md](composite-risk-score.md)*
 
 **All four input signals are now in Postgres.** With EPSS shipped, this is the
 last piece that turns four independent columns into one answer to the question
@@ -118,6 +118,17 @@ joining `nvd_vulnerabilities`, `kev_vulnerabilities`, `epss_scores`, and
 
 Sums to 1.0 at maximum, ×100 for the reported score. Bands: 0–39 low, 40–69
 moderate, 70–84 high, 85–100 critical.
+
+> **Superseded on the bands.** Simulated across all 371,323 production rows, a
+> CVE not on KEV tops out at **61** — so under these cut-points nothing outside
+> KEV can ever be rated "high," which defeats the "high-EPSS, not yet on KEV"
+> query this was built for. (EPSS is heavily skewed: median probability 0.00714,
+> so the 0.30 weight contributes ~0.2 points for a typical CVE. And
+> `ssvc_exploitation='active'` turns out to be a KEV alias — the two sets differ
+> by 6 rows — so its +0.06 is unreachable off KEV too.) Recalibrated bands
+> (25 / 45 / 65) are in [composite-risk-score.md](composite-risk-score.md) §3.4,
+> along with the missing-CVSS policy in §3.2 (25,727 rows have no CVSS at all,
+> 40% of them published in 2025+).
 
 Returned shape: `{cve_id, score, band, components: {...}, rationale}` so the
 agent can both rank and explain. Also exposed as a SQL view (`v_cve_risk`) so
