@@ -2,9 +2,14 @@ import os
 
 # Must be set before any project module is imported so Settings() validation passes.
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-placeholder")
-# Importing app.py constructs the pydantic-ai Agent, which resolves the Anthropic
-# provider and requires this key even though tests never call the model.
+# Importing app.py constructs the pydantic-ai Agent, which resolves the provider named by
+# LLM_MODEL and requires its key at import time even though tests never call the model.
+# One placeholder per hosted provider so the import works whichever default LLM_MODEL
+# carries (local ollama: needs none). See plans/pluggable-model-backends.md.
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-placeholder")
+os.environ.setdefault("GOOGLE_API_KEY", "test-placeholder")
+os.environ.setdefault("CEREBRAS_API_KEY", "test-placeholder")
+os.environ.setdefault("OPENROUTER_API_KEY", "test-placeholder")
 # Chainlit's @cl.oauth_callback raises at import time unless at least one OAuth
 # provider is configured. Placeholders satisfy that check; tests never hit GitHub.
 os.environ.setdefault("OAUTH_GITHUB_CLIENT_ID", "test-client-id")
