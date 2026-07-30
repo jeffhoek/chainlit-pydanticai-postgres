@@ -237,6 +237,18 @@ Three notes:
   a CVE lists several CWEs — Log4Shell (`CWE-20`, `CWE-400`, `CWE-502`, `CWE-917`) resolves to 1.0
   via CWE-502, which is exactly the intended behavior and a good regression fixture.
 
+**Source CWEs from both tables, concatenated.** `kev_vulnerabilities` carries its own `cwes TEXT[]`
+independent of NVD's, and the two disagree in a way that matters: **93 KEV CVEs have NVD `cwes`
+consisting only of `NVD-CWE-*` placeholders while KEV holds real weakness IDs**. Reading only
+`n.cwes` sends all 93 to the neutral default despite the data being right there — and these are KEV
+rows, the highest-value records in the corpus.
+
+Note that `COALESCE(n.cwes, k.cwes)` does *not* fix this: zero KEV rows have an empty NVD array, so
+the coalesce never fires. The array concatenation in §4 is what's required. Concatenating is safe
+precisely because max-member-wins is already the rule — merging can only raise the component when
+one source knows something the other doesn't, never lower it. 1,484 of 1,655 KEV rows carry CWE
+data worth merging.
+
 ### 3.4 Bands must be recalibrated — the sketch's cut-points are unreachable
 
 The sketch proposes 0–39 low / 40–69 moderate / 70–84 high / 85–100 critical. Because
@@ -386,8 +398,11 @@ LEFT JOIN nvd_vulnerabilities n ON n.cve_id = u.cve_id
 LEFT JOIN kev_vulnerabilities  k ON k.cve_id = u.cve_id
 LEFT JOIN epss_scores          e ON e.cve_id = u.cve_id
 LEFT JOIN LATERAL (
+    -- Concatenate, don't coalesce: see §3.3. NVD and KEV each carry their own
+    -- cwes[], and 93 KEV CVEs have real weakness data in KEV while NVD holds
+    -- only NVD-CWE-* placeholders. Max-member-wins already defines the merge.
     SELECT MAX(cc.severity) AS severity
-    FROM unnest(COALESCE(n.cwes, '{}')) AS t(cwe_id)
+    FROM unnest(COALESCE(n.cwes, '{}') || COALESCE(k.cwes, '{}')) AS t(cwe_id)
     JOIN cwe_class cc ON cc.cwe_id = t.cwe_id
 ) cw ON TRUE;
 ```
@@ -550,7 +565,10 @@ FROM v_cve_risk GROUP BY 1 ORDER BY 1;
 ## 7. Ordered implementation steps
 
 1. **`rag/risk.py`** — weights, CWE class map, bands, `score_expression()`, `view_ddl()`, band and
-   rationale helpers. Import-time assertion that the weights sum to 1.00.
+   rationale helpers. Import-time assertion that the weights sum to 1.00. Two things the §4 sketch
+   elides and `score_expression()` must actually emit: `COALESCE(cw.severity, 0.5)` so an unmapped
+   CWE lands on the neutral default rather than NULL-poisoning the sum (§3.2), and the concatenated
+   `n.cwes || k.cwes` source (§3.3).
 2. **Wire the DDL into schema setup** — `init_db()` ([rag/database.py:143](rag/database.py:143))
    executes `view_ddl()` after `SCHEMA_SQL`, under the same `db_init_schema` gate.
 3. **Unit tests** for `rag/risk.py` (§8) — bands, rationale, missing-signal policy, CWE max-member.
@@ -594,7 +612,11 @@ fixture ([tests/conftest.py:73](tests/conftest.py:73)). This is the tier that ac
 the model, since the arithmetic is SQL:
 
 - **A CVE in KEV but not NVD appears in the view** — the universe-CTE regression, and the one most
-  likely to be broken by a future "simplify the joins" refactor.
+  likely to be broken by a future "simplify the joins" refactor. Assert its **CWE component is
+  sourced from `kev_vulnerabilities.cwes`**, not just that the row is non-NULL: appearing in the
+  view with a silently neutralized CWE term is the failure this is guarding against.
+- **A CVE whose NVD `cwes` holds only `NVD-CWE-noinfo` while KEV holds a real CWE** takes the KEV
+  value — the 93-row case from §3.3, and the one a `COALESCE`-based implementation gets wrong.
 - **A CVE with no EPSS row scores non-NULL**, with `c_epss = 0`.
 - **A CVE with both CVSS versions NULL** gets the neutral prior and `cvss_imputed = TRUE`; a CVE
   with only `cvss_v2_score` uses it rather than imputing.
