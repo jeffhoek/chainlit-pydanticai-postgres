@@ -53,6 +53,9 @@ var actionButtons = join([
   'High-EPSS CVEs not yet listed in KEV'
   'CVSS 9+ CVEs with low exploitation likelihood'
   'Biggest EPSS movers since the last update'
+  'Top 20 CVEs by composite risk score'
+  'Highest-risk CVEs not yet on KEV'
+  'Risk score breakdown for CVE-2021-44228'
 ], '","')
 
 // FastMCP 3.x enables DNS-rebinding Host validation by default and only allows

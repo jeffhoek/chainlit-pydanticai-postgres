@@ -48,7 +48,10 @@ data:
     "CVSS 10.0 CVEs not yet exploited (SSVC none)",
     "High-EPSS CVEs not yet listed in KEV",
     "CVSS 9+ CVEs with low exploitation likelihood",
-    "Biggest EPSS movers since the last update"]
+    "Biggest EPSS movers since the last update",
+    "Top 20 CVEs by composite risk score",
+    "Highest-risk CVEs not yet on KEV",
+    "Risk score breakdown for CVE-2021-44228"]
   # Logfire tracing (docs/observability.md). Requires LOGFIRE_TOKEN in the
   # rag-secrets secret (synced from SSM /rag/LOGFIRE_TOKEN via ESO).
   LOGFIRE_ENABLED: "true"

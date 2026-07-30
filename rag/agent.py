@@ -8,6 +8,7 @@ from pydantic_ai.models.anthropic import AnthropicModelSettings
 
 from config import settings
 from rag.embeddings import generate_embedding
+from rag.risk import RiskScore, score_cves
 from rag.sql_utils import apply_row_limit, format_query_results, validate_sql
 from rag.vector_store import PgVectorStore
 
@@ -55,6 +56,32 @@ async def query(ctx: RunContext[Deps], sql: str) -> str:
         return "No results found."
 
     return format_query_results(rows)
+
+
+@rag_agent.tool
+async def risk_score(ctx: RunContext[Deps], cve_ids: list[str]) -> list[RiskScore] | str:
+    """Composite 0-100 risk score for specific CVEs, with a per-signal breakdown.
+
+    Blends CVSS severity, EPSS likelihood, KEV listing, SSVC urgency, and CWE
+    weakness class into one number. Use this for a handful of NAMED CVEs. For
+    ranking, filtering, or counting across the corpus, query the `v_cve_risk` view
+    with the `query` tool instead — one ORDER BY beats 25 tool calls.
+
+    Args:
+        cve_ids: CVE IDs to score, e.g. ["CVE-2021-44228"]. At most 25 per call;
+            they are ranked highest-risk first in the result.
+
+    Returns:
+        One entry per CVE with score, band, weighted components, and a rationale;
+        an entry with a null score means the CVE is in neither KEV nor NVD.
+    """
+    try:
+        return await score_cves(ctx.deps.vector_store.pool, cve_ids)
+    except asyncpg.PostgresError as e:
+        return f"Risk score error: {e}"
+    except Exception:
+        logging.exception("Unexpected error in risk_score tool")
+        return "Internal error computing risk scores."
 
 
 @rag_agent.tool

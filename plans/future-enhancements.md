@@ -94,68 +94,49 @@ Notes worth carrying forward:
   covers "what moved" at zero cost) and surfacing EPSS in `retrieve` result
   cards, which needs a `vector_store.search` signature change.
 
-## High Priority — Production-Readiness
+### Composite Risk Score ✅ *(plan: [composite-risk-score.md](composite-risk-score.md); docs: [risk-scoring.md](../docs/risk-scoring.md))*
 
-### Composite Risk Score Tool ⬅️ *next up — unblocked; plan: [composite-risk-score.md](composite-risk-score.md)*
+Blends all four prioritization signals — CVSS severity, EPSS likelihood, KEV
+confirmed exploitation, SSVC urgency — plus CWE weakness class as a 0.05
+tiebreaker into one 0–100 number with a per-signal breakdown. Turns *"what do I
+patch first?"* from a bespoke four-way JOIN with a ranking invented per turn into
+`SELECT cve_id, risk_score FROM v_cve_risk ORDER BY risk_score DESC`.
 
-**All four input signals are now in Postgres.** With EPSS shipped, this is the
-last piece that turns four independent columns into one answer to the question
-analysts actually ask: *what do I patch first?*
+Shipped: a `v_cve_risk` view (one row per CVE in NVD **or** KEV, six `c_*`
+contribution columns beside the score) and a `risk_score(cve_ids)` tool on both
+the agent and the MCP server, taking up to 25 IDs and returning score, band,
+components, and a prose rationale; plus the system-prompt primer, MCP docstring,
+and three quick-query buttons.
 
-A third agent tool, `risk_score(cve_id)`, that returns a single 0–100 number
-plus a structured breakdown of contributing factors. Internally a SQL query
-joining `nvd_vulnerabilities`, `kev_vulnerabilities`, `epss_scores`, and
-`cwe_definitions`, plus a pure Python function that blends:
+Notes worth carrying forward:
 
-| Signal | Source | Weight |
-| --- | --- | --- |
-| CVSS base score, normalized 0–1 | `COALESCE(cvss_v31_score, cvss_v2_score) / 10` | 0.25 |
-| EPSS probability | `epss_scores.probability` | 0.30 |
-| KEV listed | presence in `kev_vulnerabilities` | +0.20 flat |
-| KEV ransomware use | `known_ransomware_campaign_use = 'Known'` | +0.10 flat |
-| SSVC urgency | `ssvc_exploitation=active` (+0.06), `automatable=yes` (+0.02), `technical_impact=total` (+0.02) | up to +0.10 |
-| CWE class severity | static map over `cwes[]` (memory corruption / injection > info-disclosure / DoS) | 0.05 |
-
-Sums to 1.0 at maximum, ×100 for the reported score. Bands: 0–39 low, 40–69
-moderate, 70–84 high, 85–100 critical.
-
-> **Superseded on the bands.** Simulated across all 371,323 production rows, a
-> CVE not on KEV tops out at **61** — so under these cut-points nothing outside
-> KEV can ever be rated "high," which defeats the "high-EPSS, not yet on KEV"
-> query this was built for. (EPSS is heavily skewed: median probability 0.00714,
-> so the 0.30 weight contributes ~0.2 points for a typical CVE. And
-> `ssvc_exploitation='active'` turns out to be a KEV alias — the two sets differ
-> by 6 rows — so its +0.06 is unreachable off KEV too.) Recalibrated bands
-> (25 / 45 / 65) are in [composite-risk-score.md](composite-risk-score.md) §3.4,
-> along with the missing-CVSS policy in §3.2 (25,727 rows have no CVSS at all,
-> 40% of them published in 2025+).
-
-Returned shape: `{cve_id, score, band, components: {...}, rationale}` so the
-agent can both rank and explain. Also exposed as a SQL view (`v_cve_risk`) so
-the existing `query` tool can `ORDER BY risk_score DESC` for bulk questions.
-
-Implementation notes carried over from EPSS:
-
-- **`LEFT JOIN epss_scores`, always** — the row sets only partially overlap
-  (EPSS skips REJECTED/RESERVED CVEs and can score a CVE before our NVD sync
-  sees it). A missing EPSS row contributes 0, not NULL — the score must never
-  come back NULL because one signal is absent.
-- **Coalesce CVSS versions** — older CVEs carry only `cvss_v2_score`; treating
-  a NULL v3.1 as "no severity" silently zeroes the largest weight.
-- **`previous_probability` is free movement data** — a CVE whose EPSS jumped
-  this week is a stronger call to action than a flat one at the same score.
-  Worth surfacing in `rationale` even if it stays out of the weighted sum.
-
-This is the natural high-leverage payoff now that EPSS is loaded: every
-API-only competitor computes this with live fan-out per CVE; with everything
-pre-joined in Postgres, the whole dataset ranks in milliseconds.
-
-Tuning: ship with fixed weights, log components via Langfuse, revisit once
-real usage data shows which CVEs analysts actually act on.
+- **One source of truth, in SQL.** `rag/risk.py` owns the constants and
+  *generates* the view DDL from them; the arithmetic runs only in Postgres. The
+  obvious "view plus a Python blender" design is two implementations that drift
+  on the first weight edit, and CI never notices because the Python one still
+  passes its own tests.
+- **The bands were the real finding.** `ssvc_exploitation='active'` is a KEV
+  alias (the two sets differ by 6 rows in 371k), so a non-KEV CVE tops out at
+  **61**. The originally sketched 70/85 cut-points made "high" unreachable off
+  KEV, which defeats the "high-EPSS, not yet on KEV" query. Recalibrated to
+  25/45/65, which puts ~1,874 non-KEV CVEs in the high band.
+- **Missing CVSS is imputed, not zeroed.** 25,727 rows have no CVSS at all and
+  40% of those were published in 2025+; a neutral 5.0 prior with `cvss_imputed`
+  exposed beats making the ranking blind to the newest records.
+- **CWEs are concatenated across NVD and KEV, not coalesced** — ~93 KEV CVEs
+  hold real weakness IDs in KEV while NVD has only `NVD-CWE-*` placeholders, and
+  a COALESCE never fires because the NVD array is non-empty, just useless.
+- **Deferred**: materializing the view (only if measurement shows the plain one
+  is too slow — same object name, so it's a rollout change), learned weights
+  (needs the Langfuse usage data this ships the instrumentation for), and risk
+  scores in `retrieve` result cards (same `vector_store.search` signature change
+  already deferred for EPSS — do both at once).
 
 **Unblocks**: Software Inventory Matching (rank only the CVEs that apply),
 Alerting (threshold on risk band rather than raw CVSS), and Retrieval Scoring
 Beyond Vector Similarity (reuse `v_cve_risk` as the ranking weight).
+
+## High Priority — Production-Readiness
 
 ### Software Inventory Matching
 

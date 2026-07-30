@@ -20,6 +20,7 @@ import pytest
 from pgvector.asyncpg import register_vector
 
 from rag.database import SCHEMA_SQL
+from rag.risk import view_ddl
 from rag.vector_store import PgVectorStore
 
 # Unit embeddings used for seeded golden data.
@@ -34,6 +35,11 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
 
 async def _seed_tables(conn: asyncpg.Connection) -> None:
     await conn.execute(SCHEMA_SQL)
+    # DROP first, not CREATE OR REPLACE: Postgres refuses to replace a view whose
+    # column list changed, so a stale v_cve_risk left in the test database by an
+    # earlier revision of rag/risk.py would fail every run until dropped by hand.
+    await conn.execute("DROP VIEW IF EXISTS v_cve_risk;")
+    await conn.execute(view_ddl())
     await conn.execute(
         """
         INSERT INTO kev_vulnerabilities (cve_id, content, embedding)

@@ -48,9 +48,12 @@ GRANT SELECT ON nvd_vulnerabilities TO app_readonly;
 GRANT SELECT ON cwe_definitions TO app_readonly;
 GRANT SELECT ON etl_runs TO app_readonly;
 GRANT SELECT ON epss_scores TO app_readonly;
+GRANT SELECT ON v_cve_risk TO app_readonly;
 ```
 
-Only these tables are granted — no wildcard `ALL TABLES`. Any new table added later requires an explicit grant before `app_readonly` can read it. ALTER DEFAULT PRIVILEGES is an optional way to automate this for future tables:
+`v_cve_risk` is a view, not a table, and it is created by `init_db()` only when `DB_INIT_SCHEMA=true` — so in production it must be applied with the admin role first (see [risk-scoring.md](risk-scoring.md#production)). `app_etl` needs no grant: nothing writes the view. Being a plain view it runs with the definer's privileges, so `app_readonly` does not additionally need SELECT on the four underlying tables *through* the view — though it already has it on all four.
+
+Only these objects are granted — no wildcard `ALL TABLES`. Any new table added later requires an explicit grant before `app_readonly` can read it. ALTER DEFAULT PRIVILEGES is an optional way to automate this for future tables:
 
 ```sql
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
