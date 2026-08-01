@@ -20,6 +20,14 @@ from rag.risk import (
     MAX_BATCH,
     MAX_WEIGHT,
     REQUIRED_WEIGHT_TOTAL,
+    WEIGHT_CVSS,
+    WEIGHT_CWE,
+    WEIGHT_EPSS,
+    WEIGHT_KEV,
+    WEIGHT_RANSOMWARE,
+    WEIGHT_SSVC_AUTOMATABLE,
+    WEIGHT_SSVC_EXPLOITATION,
+    WEIGHT_SSVC_IMPACT,
     band,
     build_rationale,
     component_expressions,
@@ -95,16 +103,46 @@ def test_band_accepts_decimal_without_float_rounding():
     assert band(BAND_MODERATE) == "moderate"
 
 
-def test_non_kev_ceiling_lands_inside_the_high_band():
+def test_typical_non_kev_ceiling_lands_inside_the_high_band():
     """The property the bands were recalibrated for.
 
-    A CVE that is not on KEV can reach at most CVSS + EPSS + automatable + impact +
-    top CWE class. If that ceiling ever falls below the high cut-point the
-    early-warning population goes invisible again; if it rises above the critical
-    cut-point, "critical" stops meaning confirmed exploitation.
+    c_kev and c_ransomware are both gated on a KEV row existing, and
+    ssvc_exploitation='active' is a KEV alias for all but ~3 CVEs in the corpus, so
+    in practice a non-KEV CVE reaches at most CVSS + EPSS + automatable + impact +
+    top CWE class. The measured maximum (63.5 on 2026-08-01) sits just under this.
+
+    If this ceiling ever falls below the high cut-point the early-warning population
+    goes invisible again and the bands need re-cutting.
     """
-    ceiling = (Decimal("0.25") + Decimal("0.30") + Decimal("0.02") + Decimal("0.02") + Decimal("0.05")) * 100
+    ceiling = (WEIGHT_CVSS + WEIGHT_EPSS + WEIGHT_SSVC_AUTOMATABLE + WEIGHT_SSVC_IMPACT + WEIGHT_CWE) * 100
+
+    assert ceiling == Decimal("64")
     assert band(ceiling) == "high"
+
+
+def test_absolute_non_kev_ceiling_can_reach_critical():
+    """The exception the typical ceiling hides, pinned so it isn't forgotten.
+
+    ssvc_exploitation='active' is *nearly* a KEV alias, not exactly one — a few CVEs
+    carry it without being KEV-listed, and those can add 0.06 the rest cannot. That
+    is the only path by which a non-KEV CVE can be labelled "critical", so it must be
+    a known property rather than a surprise in production.
+
+    docs/risk-scoring.md carries the query that monitors this population.
+    """
+    ceiling = (
+        WEIGHT_CVSS + WEIGHT_EPSS + WEIGHT_SSVC_EXPLOITATION + WEIGHT_SSVC_AUTOMATABLE + WEIGHT_SSVC_IMPACT + WEIGHT_CWE
+    ) * 100
+
+    assert ceiling == Decimal("70")
+    assert band(ceiling) == "critical"
+
+
+def test_only_a_kev_row_can_reach_the_top_of_the_scale():
+    """100 requires the two KEV-gated terms, which is what makes 100 mean something."""
+    without_kev_terms = (MAX_WEIGHT - WEIGHT_KEV - WEIGHT_RANSOMWARE) * 100
+
+    assert without_kev_terms == Decimal("70")
 
 
 # -- Generated SQL matches the constants --

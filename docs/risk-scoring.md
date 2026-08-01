@@ -171,23 +171,52 @@ Three notes:
 | critical | 65–100 | Effectively requires confirmed exploitation |
 
 These are calibrated against the production corpus, not chosen for roundness. The obvious
-70/85 cut-points are **unreachable off KEV**: `ssvc_exploitation='active'` is functionally an alias
-for KEV listing (the two sets differ by ~6 rows out of 371k), so the SSVC exploitation bonus is
-KEV-gated, and a non-KEV CVE tops out around **61** — not even CVSS 10.0 with EPSS 0.99999 reaches
-70. Under those bands the flagship query this work exists for, *"high-EPSS CVEs that aren't on KEV
-yet"*, would return CVEs labelled "moderate", which is precisely the wrong signal.
+70/85 cut-points are **unreachable off KEV**: `c_kev` and `c_ransomware` are both gated on a KEV
+row existing, and `ssvc_exploitation='active'` is functionally an alias for KEV listing (the two
+sets differ by ~6 rows out of 371k), so that bonus is effectively KEV-gated too. A non-KEV CVE is
+therefore capped at **64** — CVSS 10.0 with EPSS 0.99999, automatable, total impact, and a
+top-tier CWE still only reaches 64, and the measured maximum is 63.5. Under 70/85 bands the
+flagship query this work exists for, *"high-EPSS CVEs that aren't on KEV yet"*, would return CVEs
+labelled "moderate", which is precisely the wrong signal.
 
-Measured distribution across the production corpus:
+The handful of CVEs carrying `active` *without* a KEV listing are the one exception — they can add
+0.06 the rest cannot, reaching 70. See
+[Re-verify the band calibration](#re-verify-the-band-calibration) for why that population is the
+thing worth monitoring rather than the maximum itself.
+
+Measured against the deployed view on 2026-08-01, 372,463 rows:
 
 | Band | Rows | Share | KEV | non-KEV |
 | --- | --- | --- | --- | --- |
-| low 0–24 | 282,591 | 76.10% | 0 | 282,591 |
-| moderate 25–44 | 85,244 | 22.96% | 41 | 85,203 |
-| high 45–64 | 2,523 | 0.68% | 649 | **1,874** |
-| critical 65+ | 965 | 0.26% | 965 | 0 |
+| low 0–24 | 282,227 | 75.77% | 0 | 282,227 |
+| moderate 25–44 | 86,732 | 23.29% | 41 | 86,691 |
+| high 45–64 | 2,533 | 0.68% | 644 | **1,889** |
+| critical 65+ | 971 | 0.26% | 971 | 0 |
 
-A clean pyramid; "critical" is 0.26% of the corpus and means confirmed exploitation; and 1,874
-non-KEV CVEs reach "high" — the early-warning population the naive bands rendered invisible.
+A clean pyramid; "critical" is 0.26% of the corpus and means confirmed exploitation; and 1,889
+non-KEV CVEs reach "high" — the early-warning population the naive bands rendered invisible. No KEV
+CVE falls into "low", and only 41 sit in "moderate".
+
+Mean weighted contribution per component over the same run, useful as a wiring check — each of
+these is independently derivable from the source distributions:
+
+| `c_cvss` | `c_epss` | `c_kev` | `c_ransomware` | `c_ssvc` | `c_cwe` |
+| --- | --- | --- | --- | --- | --- |
+| 0.1623 | 0.0082 | 0.0009 | 0.0001 | 0.0055 | 0.0335 |
+
+`c_cvss` implies a mean input of 6.49, which is exactly `0.931 × 6.60 + 0.069 × 5.0` — the measured
+mean CVSS blended with the imputed prior at its measured frequency. `c_ssvc` reconstructs as
+`(1,655 × 0.06 + 38,769 × 0.02 + 57,553 × 0.02) / 371,323 = 0.00546` from the three factor
+populations. `c_cwe` implies a mean class severity of 0.67 — not flat at the 0.5 neutral default,
+so the map is matching; not near 1.0, so it isn't over-rating.
+
+> **These figures supersede the pre-ship estimates** in
+> [plans/composite-risk-score.md](../plans/composite-risk-score.md) §3.4, which were simulated with
+> an inline query rather than the shipped view. That simulation scored an unrated CWE at 0 instead
+> of the neutral 0.025 the model specifies, which put roughly half the corpus about 1.3 points low
+> and is why the plan reports a maximum of 97.5 where the view returns 100.0. The band *shares* are
+> unaffected — the offset was near-uniform and the bands are wide relative to it — so the
+> cut-points did not need re-cutting.
 
 ### KEV's effective weight is 0.36, deliberately
 
@@ -345,12 +374,44 @@ SELECT percentile_disc(ARRAY[0.5, 0.9, 0.99, 0.999])
 FROM v_cve_risk;
 ```
 
-Expected: p50 ≈ 19, p90 ≈ 28, p99 ≈ 43, p99.9 ≈ 84, max ≈ 97.5, **max_nonkev ≈ 61**.
+Measured 2026-08-01: p50 20.2, p90 29.3, p99 44.1, p99.9 85.7, min 1.7, max 100.0,
+**max_nonkev 63.5**.
 
-The load-bearing assertion is the last one: `max_nonkev` must land **inside** the high band (45–64).
-If it drifts above 65, non-KEV CVEs start being labelled "critical" and the band loses its meaning;
-if it drops below 45, the early-warning population goes invisible again and the bands need
-re-cutting.
+A `min` comfortably above zero is its own check: the floor is `0.05 × 0.3 = 0.015` from the lowest
+CWE tier, so a min near 0 would mean the `COALESCE(cw.severity, 0.5)` has stopped firing and
+unrated CWEs are being zeroed rather than neutralized.
+
+The load-bearing assertion is `max_nonkev`, which must land **inside** the high band (45–64). If it
+drops below 45 the early-warning population goes invisible again and the bands need re-cutting.
+
+Drifting the *other* way is close to structurally impossible, and it is worth knowing why rather
+than watching a number that cannot move. A non-KEV row scores at most:
+
+| Non-KEV ceiling | Value |
+| --- | --- |
+| CVSS 10 (0.25) + EPSS ~1.0 (0.30) + automatable & total (0.04) + top CWE class (0.05) | **64** |
+| …plus `ssvc_exploitation='active'` (0.06) | **70** |
+
+`c_kev` and `c_ransomware` are both gated on a KEV row existing, so a non-KEV CVE can never reach
+that 0.30. At 63.5 the observed maximum is already at 99% of the practical ceiling — it stopped
+climbing because it ran out of room, not by coincidence.
+
+The second line is the only path by which a non-KEV CVE can be labelled "critical", and it applies
+to the handful of CVEs that are `ssvc_exploitation='active'` without being KEV-listed (3 rows at
+calibration). That population is small enough to inspect directly, and is the thing actually worth
+monitoring here:
+
+```sql
+-- The only rows that can breach 65 without confirmed exploitation
+SELECT cve_id, risk_score, cvss_score, epss_probability, ssvc_exploitation
+FROM v_cve_risk
+WHERE NOT kev_listed AND ssvc_exploitation = 'active'
+ORDER BY risk_score DESC;
+```
+
+Expect a single-digit row count, all scoring well under 65. A row here at 65+ is a genuine
+mislabel — either KEV is lagging a CVE that CISA's own SSVC data already calls actively exploited
+(in which case the score is arguably right and KEV is wrong), or the SSVC value is stale.
 
 ### Performance
 
