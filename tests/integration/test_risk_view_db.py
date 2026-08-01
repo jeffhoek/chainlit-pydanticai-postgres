@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from rag.risk import score_cves
+from rag.risk import refresh_sql, score_cves
 
 # Real CVEs whose inputs pin the top of the scale, plus synthetic ones exercising the
 # missing-signal policy. The synthetic IDs use year 2090 so they cannot collide with
@@ -124,6 +124,9 @@ async def risk_pool(seeded_pool):
             """,
             EPSS_ROWS,
         )
+        # The view is a snapshot; without this every assertion below reads the
+        # pre-fixture corpus.
+        await conn.execute(refresh_sql())
 
     yield seeded_pool
 
@@ -145,6 +148,7 @@ async def risk_pool(seeded_pool):
             """,
             LOG4SHELL,
         )
+        await conn.execute(refresh_sql())
 
 
 async def fetch_risk(pool, cve_id: str):

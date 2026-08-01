@@ -51,7 +51,10 @@ GRANT SELECT ON epss_scores TO app_readonly;
 GRANT SELECT ON v_cve_risk TO app_readonly;
 ```
 
-`v_cve_risk` is a view, not a table, and it is created by `init_db()` only when `DB_INIT_SCHEMA=true` — so in production it must be applied with the admin role first (see [risk-scoring.md](risk-scoring.md#production)). `app_etl` needs no grant: nothing writes the view. Being a plain view it runs with the definer's privileges, so `app_readonly` does not additionally need SELECT on the four underlying tables *through* the view — though it already has it on all four.
+`v_cve_risk` is a **materialized** view, and it is created by `init_db()` only when `DB_INIT_SCHEMA=true` — so in production it must be applied with the admin role first (see [risk-scoring.md](risk-scoring.md#production)). Two consequences for roles:
+
+- Re-applying the DDL **drops and recreates** the object, which discards this grant. Re-issue `GRANT SELECT ON v_cve_risk TO app_readonly` every time, not just on first deploy.
+- `app_etl` needs **ownership**, not a grant: `REFRESH MATERIALIZED VIEW` is owner-only and no `GRANT` confers it. Follow the grant above with `ALTER MATERIALIZED VIEW v_cve_risk OWNER TO app_etl;`. This is the one exception to `app_etl` holding no DDL rights; a refresh runs as the owner, and `app_etl` already has SELECT on all four base tables, which is what repopulating requires.
 
 Only these objects are granted — no wildcard `ALL TABLES`. Any new table added later requires an explicit grant before `app_readonly` can read it. ALTER DEFAULT PRIVILEGES is an optional way to automate this for future tables:
 

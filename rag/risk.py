@@ -242,7 +242,17 @@ def cwe_class_values() -> str:
 
 
 def view_ddl() -> str:
-    """The CREATE OR REPLACE VIEW statement for v_cve_risk.
+    """The DDL that (re)creates v_cve_risk and its indexes.
+
+    A MATERIALIZED view, not a plain one. Measured 2026-08-01, the plain view took
+    **12.8s** for `ORDER BY risk_score DESC LIMIT 100` against the production corpus,
+    six times the ~2s budget: risk_score is computed, so no index can help and every
+    one of the ~372k rows has to be built before the sort can start. Materializing
+    trades staleness bounded by the ETL cadence (~12h) for indexed lookups.
+
+    DROP then CREATE, because materialized views have no OR REPLACE. That makes this
+    statement expensive — it repopulates the whole matview — so it belongs in schema
+    setup, not on a hot path. refresh_sql() is what the ETL runs.
 
     Every interpolated fragment comes from the module constants above — there is no
     caller input anywhere in this statement, which is what makes the f-string safe.
@@ -251,7 +261,22 @@ def view_ddl() -> str:
     component_sql = ",\n        ".join(f"{comp[name]} AS {name}" for name in COMPONENT_NAMES)
 
     return f"""
-CREATE OR REPLACE VIEW {VIEW_NAME} AS
+-- Drop whichever kind is actually there. v_cve_risk shipped as a plain view first,
+-- and DROP MATERIALIZED VIEW will not remove one (nor vice versa) — while IF EXISTS
+-- only suppresses "does not exist", not "wrong object type". So a database still
+-- carrying the plain view, production included, needs the relkind branch to migrate.
+DO $$
+DECLARE kind "char";
+BEGIN
+    SELECT relkind INTO kind FROM pg_class WHERE oid = to_regclass('{VIEW_NAME}');
+    IF kind = 'v' THEN
+        EXECUTE 'DROP VIEW {VIEW_NAME} CASCADE';
+    ELSIF kind = 'm' THEN
+        EXECUTE 'DROP MATERIALIZED VIEW {VIEW_NAME} CASCADE';
+    END IF;
+END $$;
+
+CREATE MATERIALIZED VIEW {VIEW_NAME} AS
 WITH universe AS (
     -- Union rather than nvd_vulnerabilities alone. Every KEV CVE is present in NVD
     -- today, so this currently costs a UNION and buys nothing — but the loaders are
@@ -322,7 +347,23 @@ SELECT
     ssvc_technical_impact,
     cwe_top
 FROM components;
+
+-- UNIQUE on cve_id is not just tidiness: REFRESH ... CONCURRENTLY refuses to run
+-- without a unique index, and without CONCURRENTLY the refresh takes an exclusive
+-- lock that blocks every read for its whole duration.
+CREATE UNIQUE INDEX {VIEW_NAME}_cve_id_idx ON {VIEW_NAME} (cve_id);
+CREATE INDEX {VIEW_NAME}_score_idx ON {VIEW_NAME} (risk_score DESC);
 """.strip()
+
+
+def refresh_sql() -> str:
+    """The statement the ETL runs after the loaders, to pick up new data.
+
+    CONCURRENTLY so readers are never blocked: a plain REFRESH holds an ACCESS
+    EXCLUSIVE lock, which would make every risk query hang for the duration of the
+    rebuild rather than merely returning slightly stale scores.
+    """
+    return f"REFRESH MATERIALIZED VIEW CONCURRENTLY {VIEW_NAME};"
 
 
 # -- Rationale ------------------------------------------------------------------

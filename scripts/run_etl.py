@@ -43,6 +43,9 @@ STEPS: list[tuple[str, str]] = [
     ("NVD full incremental", "scripts.load_nvd_full:run_incremental"),
     ("KEV catalog", "scripts.load_kev:run"),
     ("EPSS scores", "scripts.load_epss:run"),
+    # Must stay last: v_cve_risk is materialized over all three tables above, so it
+    # is stale until every loader has committed.
+    ("Risk score refresh", "scripts.refresh_risk_view:run"),
 ]
 
 

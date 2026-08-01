@@ -308,16 +308,20 @@ FROM v_cve_risk WHERE cve_id = 'CVE-2021-44228';
 `init_db()` applies `view_ddl()` after `SCHEMA_SQL`, under the same `db_init_schema` gate. Nothing
 to do.
 
-**Changing the view's columns requires a `DROP VIEW` first.** `CREATE OR REPLACE VIEW` can only
-append columns — renaming, reordering, or removing one fails with *"cannot change name of view
-column"*. The test fixture ([tests/conftest.py](../tests/conftest.py)) drops first for exactly this
-reason.
+`view_ddl()` drops whatever `v_cve_risk` currently is and rebuilds it, so re-running it is always
+safe. It branches on `pg_class.relkind` rather than issuing both `DROP VIEW IF EXISTS` and
+`DROP MATERIALIZED VIEW IF EXISTS`, because `IF EXISTS` only suppresses *"does not exist"* — a
+relation of the wrong kind still raises. That branch is also the migration path for any database
+still holding the original plain view.
+
+Because it drops and repopulates, `view_ddl()` is schema-setup DDL, not something to run casually
+against a full corpus. Day to day, `refresh_sql()` is what you want.
 
 ### Production
 
 Production runs `DB_INIT_SCHEMA=false` (read-only app role, no DDL), so **`v_cve_risk` will not
-exist just because it is in the code path.** Print it and apply it with the admin role over the
-pooled host:
+exist, or update, just because it is in the code path.** Print it and apply it with the admin role
+over the pooled host:
 
 ```bash
 uv run python -c "from rag.risk import view_ddl; print(view_ddl())" > /tmp/v_cve_risk.sql
@@ -327,18 +331,28 @@ uv run python -c "from rag.risk import view_ddl; print(view_ddl())" > /tmp/v_cve
 psql "<admin-pooled-supabase-dsn>" -f /tmp/v_cve_risk.sql
 ```
 
-Then grant SELECT. [supabase-readonly-role.md](supabase-readonly-role.md) is explicit that grants
-are per-object with no wildcard — **without this the app returns permission errors on every risk
-query**:
+Expect this to take at least as long as the 12.8s query it replaces — it runs the full computation
+once to populate.
+
+Then two grants, and **both are easy to miss**:
 
 ```sql
+-- The app reads it. DROP removed any previous grant, so this is required on every
+-- re-apply, not only the first.
 GRANT SELECT ON v_cve_risk TO app_readonly;
+
+-- The ETL refreshes it. REFRESH MATERIALIZED VIEW requires OWNERSHIP — a GRANT is
+-- not enough, and app_etl is otherwise a no-DDL role. Without this the refresh step
+-- fails with "must be owner of materialized view v_cve_risk".
+ALTER MATERIALIZED VIEW v_cve_risk OWNER TO app_etl;
 ```
 
-`app_etl` needs no grant — nothing writes the view. A plain view runs with the **definer's**
-privileges by default (`security_invoker` is off unless set), so `app_readonly` does not
-additionally need SELECT on the underlying tables through the view — though it already has it on
-all four.
+Ownership by `app_etl` is safe here: a refresh executes as the owner, and `app_etl` already holds
+SELECT on all four base tables ([supabase-readonly-role.md](supabase-readonly-role.md)), which is
+exactly what repopulating needs.
+
+Order matters — `ALTER ... OWNER` after `GRANT`, since the grant is recorded against the object and
+survives the ownership change.
 
 ### Verify
 
@@ -413,23 +427,39 @@ Expect a single-digit row count, all scoring well under 65. A row here at 65+ is
 mislabel — either KEV is lagging a CVE that CISA's own SSVC data already calls actively exploited
 (in which case the score is arguably right and KEV is wrong), or the SSVC value is stale.
 
-### Performance
+### Performance — why it is materialized
 
-A plain view re-computes on every access: three LEFT JOINs plus a lateral unnest over the full CVE
-universe, then a sort. **Ship the plain view first.** If measured p95 for
-`ORDER BY risk_score DESC LIMIT 100` exceeds ~2s, promote to a materialized view:
+`v_cve_risk` shipped as a plain view and was promoted after measurement. As a plain view it
+re-computed on every access — three LEFT JOINs plus a lateral unnest over the whole CVE universe,
+then a sort — and `EXPLAIN ANALYZE` on the production corpus measured:
 
-```sql
-CREATE MATERIALIZED VIEW v_cve_risk AS <same query>;
-CREATE UNIQUE INDEX v_cve_risk_cve_id_idx ON v_cve_risk (cve_id);  -- required for CONCURRENTLY
-CREATE INDEX v_cve_risk_score_idx ON v_cve_risk (risk_score DESC);
--- then, as a 4th step in run_etl.py:
-REFRESH MATERIALIZED VIEW CONCURRENTLY v_cve_risk;
+```
+Execution Time: 12769.175 ms
 ```
 
-The trade is staleness bounded by the ETL cadence (~12h) and an added ETL step, in exchange for
-indexed millisecond ranking. The object name stays the same, so promoting is a rollout change, not
-a code change.
+**12.8 seconds against a ~2s budget.** No index could fix it: `risk_score` is computed, so every
+one of the ~372k rows has to be built before the sort can begin. Materializing is the only lever
+that changes the shape of that work.
+
+To re-measure after a schema or corpus change:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS, SETTINGS)
+SELECT cve_id, risk_score, cvss_score, epss_probability, kev_listed
+FROM v_cve_risk ORDER BY risk_score DESC LIMIT 100;
+```
+
+Run it two or three times — the first is cold and overstates. Note this reports server-side
+execution only; the latency an analyst experiences also includes the round trip to Supabase.
+
+The cost of materializing is **staleness bounded by the ETL cadence (~12h)** plus one extra ETL
+step, [scripts/refresh_risk_view.py](../scripts/refresh_risk_view.py), which must stay last in
+`STEPS` because the view reads all three loader tables.
+
+`refresh_sql()` uses `REFRESH MATERIALIZED VIEW CONCURRENTLY`. That is not optional: a plain
+`REFRESH` takes an `ACCESS EXCLUSIVE` lock, so every risk query would hang for the duration of the
+rebuild rather than just reading slightly stale scores. `CONCURRENTLY` in turn requires a unique
+index, which is why `view_ddl()` always emits `v_cve_risk_cve_id_idx`.
 
 ## What this is not
 
