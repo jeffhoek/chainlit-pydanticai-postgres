@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS nvd_vulnerabilities (
     published DATE,
     last_modified DATE,
     ssvc_exploitation VARCHAR(8),
-    ssvc_automatable VARCHAR(4),
+    ssvc_automatable VARCHAR(8),
     ssvc_technical_impact VARCHAR(8),
     ssvc_decision VARCHAR(8),
     ssvc_version VARCHAR(8),
@@ -58,10 +58,57 @@ ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS raw_json JSONB;
 
 -- Migration: add CISA-ADP SSVC v2.0.3 factor columns (see plans/ssvc-affected-integration.md)
 ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_exploitation     VARCHAR(8);   -- none|poc|active
-ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_automatable      VARCHAR(4);   -- yes|no
+ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_automatable      VARCHAR(8);   -- yes|no
 ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_technical_impact VARCHAR(8);   -- partial|total
 ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_decision         VARCHAR(8);   -- Act|Attend|Track*
 ALTER TABLE nvd_vulnerabilities ADD COLUMN IF NOT EXISTS ssvc_version          VARCHAR(8);   -- "2.0.3"
+
+-- Migration: widen ssvc_automatable from its original VARCHAR(4). CISA back-publishes
+-- its 2021-2022 decisions using SSVC v1's "Virulence" names (slow/rapid); 'rapid' is
+-- 5 chars and aborted the whole NVD incremental sync when a routine NVD metadata
+-- refresh touched four such CVEs on 2026-08-01. extract_ssvc() now maps slow->no /
+-- rapid->yes, and the extra width keeps a future vocabulary change from being a hard stop.
+--
+-- Guarded because this whole file is replayed on every full load: ALTER COLUMN TYPE is
+-- rejected outright whenever a view depends on the column, even when the type already
+-- matches, so an unconditional statement here would break full loads on any database
+-- carrying the v_cve_risk materialized view. Skipping when the width is already correct
+-- makes the replay a no-op (and a fresh CREATE TABLE above is already VARCHAR(8)).
+DO $$
+DECLARE
+    current_width int;
+BEGIN
+    SELECT character_maximum_length INTO current_width
+    FROM information_schema.columns
+    WHERE table_name = 'nvd_vulnerabilities' AND column_name = 'ssvc_automatable';
+
+    IF current_width IS NULL OR current_width >= 8 THEN
+        RETURN;  -- already widened, or column absent on a brand-new database
+    END IF;
+
+    -- A dependent view blocks the widen; Postgres's own error names the view but not
+    -- the remedy, and v_cve_risk is created out-of-band rather than by this file.
+    IF EXISTS (
+        SELECT 1 FROM pg_depend d
+        JOIN pg_rewrite r ON r.oid = d.objid
+        WHERE d.refobjid = 'nvd_vulnerabilities'::regclass
+          AND d.refobjsubid = (
+              SELECT attnum FROM pg_attribute
+              WHERE attrelid = 'nvd_vulnerabilities'::regclass
+                AND attname = 'ssvc_automatable'
+          )
+          AND d.classid = 'pg_rewrite'::regclass
+          AND r.ev_class <> 'nvd_vulnerabilities'::regclass
+    ) THEN
+        RAISE EXCEPTION
+            'ssvc_automatable is still VARCHAR(4) but a view depends on it. '
+            'Drop the dependent view(s), rerun this migration, then recreate them '
+            '(as admin: DROP MATERIALIZED VIEW v_cve_risk; ALTER TABLE ...; CREATE MATERIALIZED VIEW ...).';
+    END IF;
+
+    ALTER TABLE nvd_vulnerabilities ALTER COLUMN ssvc_automatable TYPE VARCHAR(8);
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS nvd_embedding_idx
     ON nvd_vulnerabilities
