@@ -437,6 +437,21 @@ The trade is staleness bounded by the ETL cadence (~12h) and an added ETL step, 
 indexed millisecond ranking. Defer it until measurement justifies it — the name stays the same, so
 promoting is a rollout change, not a code change.
 
+> **Outcome: promoted.** The estimate above was wrong by an order of magnitude. Measured against
+> the deployed plain view, `EXPLAIN ANALYZE` on that exact query reported **12,769 ms** — six times
+> the budget, not "seconds range, acceptable". No index could have rescued it, because `risk_score`
+> is computed and every row must be built before the sort begins.
+>
+> The promotion shipped rather than staying deferred, and it turned out to be a code change after
+> all, not merely a rollout one. Materialized views have no `OR REPLACE`, so `view_ddl()` had to
+> start dropping first — and branch on `pg_class.relkind`, since `DROP VIEW IF EXISTS` still raises
+> on a relation of the wrong kind, which is what makes it a migration path off the plain view.
+>
+> The refresh also could not be issued directly. `REFRESH MATERIALIZED VIEW` is owner-only, and the
+> route to making `app_etl` the owner ends at `GRANT CREATE ON SCHEMA public`, which would give the
+> ETL role the DDL rights it exists to not have. `refresh_sql()` calls a `SECURITY DEFINER` wrapper
+> instead. Both are detailed in [docs/risk-scoring.md](../docs/risk-scoring.md).
+
 ---
 
 ## 5. The `risk_score` tool
@@ -728,7 +743,20 @@ that the high band still contains a substantial non-KEV population (≈1,874) �
 whole reason the bands were recalibrated.
 
 **e. Measure latency** for `SELECT ... FROM v_cve_risk ORDER BY risk_score DESC LIMIT 100` and
-decide on the materialized-view promotion (§4).
+decide on the materialized-view promotion (§4). The plan gave no query for this; use:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS, SETTINGS)
+SELECT cve_id, risk_score, cvss_score, epss_probability, kev_listed
+FROM v_cve_risk ORDER BY risk_score DESC LIMIT 100;
+```
+
+Run it two or three times — the first is cold. It reports server-side execution only; what an
+analyst experiences also includes the round trip to Supabase.
+
+**Done: 12,769 ms, so the view was promoted (§4 outcome).** Re-run this after the promotion to
+confirm it drops to milliseconds, and again after any change to the view definition or a
+significant corpus growth.
 
 ---
 
@@ -736,7 +764,7 @@ decide on the materialized-view promotion (§4).
 
 | Item | Why |
 | --- | --- |
-| Materialized `v_cve_risk` + ETL refresh step | Only if §10(e) shows the plain view is too slow; same object name, so it's a rollout change |
+| ~~Materialized `v_cve_risk` + ETL refresh step~~ **— shipped, not deferred** | §10(e) measured 12,769 ms against the ~2s budget, so this promoted immediately rather than waiting. See the §4 outcome note |
 | Learned / tuned weights | Needs the Langfuse usage data this ships the instrumentation for — the tuning loop can't start before the tool exists |
 | Risk score in `retrieve` result cards | Same `vector_store.search` signature change already deferred for EPSS ([rag/vector_store.py:11](rag/vector_store.py:11)); do both at once |
 | Risk-weighted retrieval ranking | Retrieval Scoring Beyond Vector Similarity — needs evaluation against [eval-framework.md](eval-framework.md) first |
