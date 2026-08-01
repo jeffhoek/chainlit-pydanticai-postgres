@@ -52,7 +52,9 @@ uv run python -c "from rag.database import init_db; import asyncio; asyncio.run(
 
 ## ETL Scripts
 
-There are five ETL scripts, each targeting a different scope:
+There are five ETL scripts, each targeting a different scope. To run the production
+sequence rather than a single loader, see [Orchestrated run](#orchestrated-run-run_etlpy)
+below.
 
 | Script | Scope | Records | Use case |
 |---|---|---|---|
@@ -206,6 +208,54 @@ uv run python scripts/load_epss.py
 ```
 
 No API key required, and fast — ~353k rows in a couple of seconds via a bulk staging upsert. The feed refreshes daily, so this is worth running on the same schedule as KEV. Re-running within the same publication is idempotent. See [epss-integration.md](epss-integration.md) for schema, the redirect/format gotchas, and prioritization query examples.
+
+## Orchestrated run (`run_etl.py`)
+
+The individual loaders above are for one-off and first-time loads. The recurring
+refresh runs them together through a single orchestrator:
+
+```bash
+uv run python scripts/run_etl.py
+```
+
+This is the production entrypoint — the scheduled Azure Container Apps job runs the same
+script (as `/app/.venv/bin/python scripts/run_etl.py`), so this is the way to reproduce a
+production run locally. See
+[Operating the job](deploy-azure-app-service.md#operating-the-job) to trigger it in
+Azure, watch an execution, or read past logs.
+
+It runs three steps, in this order:
+
+| Step | Entrypoint | Writes |
+|---|---|---|
+| NVD full incremental | `scripts/load_nvd_full.py:run_incremental` | `nvd_vulnerabilities` |
+| KEV catalog | `scripts/load_kev.py:run` | `kev_vulnerabilities` |
+| EPSS scores | `scripts/load_epss.py:run` | `epss_scores` |
+
+Notes on behavior:
+
+- **Every step always runs.** The three loaders write different tables and are
+  independent, so a failure in one does not skip the others — the run reports each
+  outcome separately. Order is therefore not significant; NVD is first only because it
+  is the long pole. This is why the SSVC failure in the NVD step left KEV and EPSS
+  passing.
+- **The NVD step is incremental**, not a full load. It derives its start date from
+  `MAX(last_modified)` / `MAX(published)` in `nvd_vulnerabilities`, so a full load must
+  have happened first — see [Load full NVD database](#3-load-full-nvd-database-optional).
+  It takes no arguments here; for `--since` catch-ups, run the loader directly.
+- **Exit code** is 0 only if every step succeeded, 1 otherwise.
+- **Email is optional and best-effort.** If `ACS_ENDPOINT`, `ACS_SENDER` and
+  `ETL_EMAIL_TO` are all set, a summary is sent via Azure Communication Services;
+  otherwise the step logs `Email not configured — skipping`, which is normal locally.
+  A failed send never changes the exit code.
+- **Each run is recorded to the `etl_runs` table** (status, elapsed, per-step JSON
+  results). This is also best-effort — a DB write failure is logged and swallowed so it
+  cannot mask the ETL outcome. Query it to review run history:
+
+```bash
+psql "$DATABASE_URL" -c \
+  "SELECT id, run_at, status, total_elapsed FROM etl_runs ORDER BY id DESC LIMIT 10;"
+```
 
 ## NVD API Key
 
