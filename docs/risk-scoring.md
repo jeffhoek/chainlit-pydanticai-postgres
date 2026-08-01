@@ -341,18 +341,25 @@ Then two grants, and **both are easy to miss**:
 -- re-apply, not only the first.
 GRANT SELECT ON v_cve_risk TO app_readonly;
 
--- The ETL refreshes it. REFRESH MATERIALIZED VIEW requires OWNERSHIP — a GRANT is
--- not enough, and app_etl is otherwise a no-DDL role. Without this the refresh step
--- fails with "must be owner of materialized view v_cve_risk".
-ALTER MATERIALIZED VIEW v_cve_risk OWNER TO app_etl;
+-- The ETL refreshes it, through the SECURITY DEFINER wrapper rather than directly.
+-- Without this the refresh step fails with "permission denied for materialized view".
+GRANT EXECUTE ON FUNCTION refresh_v_cve_risk() TO app_etl;
 ```
 
-Ownership by `app_etl` is safe here: a refresh executes as the owner, and `app_etl` already holds
-SELECT on all four base tables ([supabase-readonly-role.md](supabase-readonly-role.md)), which is
-exactly what repopulating needs.
+**Do not try to make `app_etl` the owner instead.** `REFRESH MATERIALIZED VIEW` is owner-only and
+no `GRANT` confers it, so ownership looks like the obvious fix — but it needs two escalations in
+sequence, and the second is disqualifying:
 
-Order matters — `ALTER ... OWNER` after `GRANT`, since the grant is recorded against the object and
-survives the ownership change.
+| Attempt | Result |
+| --- | --- |
+| `ALTER MATERIALIZED VIEW v_cve_risk OWNER TO app_etl` | `ERROR: must be able to SET ROLE "app_etl"` |
+| `GRANT app_etl TO postgres`, then retry | `ERROR: permission denied for schema public` |
+| `GRANT CREATE ON SCHEMA public TO app_etl` | Works — and lets the ETL role create objects in `public`, which is exactly what the role exists to prevent |
+
+`SECURITY DEFINER` inverts the problem: the function executes with the privileges of the admin role
+that created it, so `app_etl` gains one callable statement and no DDL rights at all. `REVOKE ALL
+... FROM PUBLIC` in the DDL keeps it from being world-executable, which a definer-privileged
+function otherwise would be.
 
 ### Verify
 

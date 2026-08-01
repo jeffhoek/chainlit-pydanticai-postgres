@@ -54,7 +54,7 @@ GRANT SELECT ON v_cve_risk TO app_readonly;
 `v_cve_risk` is a **materialized** view, and it is created by `init_db()` only when `DB_INIT_SCHEMA=true` — so in production it must be applied with the admin role first (see [risk-scoring.md](risk-scoring.md#production)). Two consequences for roles:
 
 - Re-applying the DDL **drops and recreates** the object, which discards this grant. Re-issue `GRANT SELECT ON v_cve_risk TO app_readonly` every time, not just on first deploy.
-- `app_etl` needs **ownership**, not a grant: `REFRESH MATERIALIZED VIEW` is owner-only and no `GRANT` confers it. Follow the grant above with `ALTER MATERIALIZED VIEW v_cve_risk OWNER TO app_etl;`. This is the one exception to `app_etl` holding no DDL rights; a refresh runs as the owner, and `app_etl` already has SELECT on all four base tables, which is what repopulating requires.
+- `app_etl` refreshes it through a `SECURITY DEFINER` wrapper, so it needs `GRANT EXECUTE ON FUNCTION refresh_v_cve_risk() TO app_etl;` and nothing more. `REFRESH MATERIALIZED VIEW` is owner-only and no `GRANT` confers it, but making `app_etl` the owner would require granting it `CREATE ON SCHEMA public` — which would let the ETL role create objects in `public` and defeat the no-DDL posture this role exists for. The wrapper runs with the admin's privileges instead, so `app_etl` keeps zero DDL rights. See [risk-scoring.md](risk-scoring.md#production).
 
 Only these objects are granted — no wildcard `ALL TABLES`. Any new table added later requires an explicit grant before `app_readonly` can read it. ALTER DEFAULT PRIVILEGES is an optional way to automate this for future tables:
 

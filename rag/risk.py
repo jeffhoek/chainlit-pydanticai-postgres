@@ -155,6 +155,10 @@ MAX_BATCH = 25
 
 VIEW_NAME = "v_cve_risk"
 
+# SECURITY DEFINER wrapper the ETL calls instead of REFRESH MATERIALIZED VIEW, which
+# is owner-only. Defined in view_ddl(), invoked by refresh_sql().
+REFRESH_FUNCTION = "refresh_v_cve_risk"
+
 # Delta above which an EPSS move is worth calling out in the rationale.
 EPSS_MOVEMENT_THRESHOLD = Decimal("0.05")
 
@@ -353,17 +357,44 @@ FROM components;
 -- lock that blocks every read for its whole duration.
 CREATE UNIQUE INDEX {VIEW_NAME}_cve_id_idx ON {VIEW_NAME} (cve_id);
 CREATE INDEX {VIEW_NAME}_score_idx ON {VIEW_NAME} (risk_score DESC);
+
+-- REFRESH MATERIALIZED VIEW is owner-only, and no GRANT confers it. Making app_etl
+-- the owner instead needs two privilege escalations — membership in app_etl, then
+-- CREATE on schema public for the new owner — and that second one would let the ETL
+-- role create objects in public, defeating the no-DDL posture that is the whole
+-- point of the role (docs/supabase-readonly-role.md).
+--
+-- SECURITY DEFINER inverts it: the function runs with the privileges of whoever
+-- created it (the admin role that applies this DDL), so app_etl needs nothing but
+-- EXECUTE. It gains exactly one callable statement rather than schema-wide DDL.
+--
+-- The pinned search_path is mandatory, not stylistic: without it a caller could
+-- prepend a schema of their own and have the definer-privileged body resolve
+-- v_cve_risk to an object they control.
+CREATE OR REPLACE FUNCTION {REFRESH_FUNCTION}()
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$ REFRESH MATERIALIZED VIEW CONCURRENTLY {VIEW_NAME} $$;
+
+-- Not executable by the world just because it is definer-privileged.
+REVOKE ALL ON FUNCTION {REFRESH_FUNCTION}() FROM PUBLIC;
 """.strip()
 
 
 def refresh_sql() -> str:
     """The statement the ETL runs after the loaders, to pick up new data.
 
-    CONCURRENTLY so readers are never blocked: a plain REFRESH holds an ACCESS
-    EXCLUSIVE lock, which would make every risk query hang for the duration of the
-    rebuild rather than merely returning slightly stale scores.
+    Calls the SECURITY DEFINER wrapper rather than REFRESH directly, so the ETL role
+    needs only EXECUTE — see the function definition in view_ddl() for why ownership
+    was the wrong lever.
+
+    The refresh inside is CONCURRENTLY so readers are never blocked: a plain REFRESH
+    holds an ACCESS EXCLUSIVE lock, which would make every risk query hang for the
+    duration of the rebuild rather than merely returning slightly stale scores.
     """
-    return f"REFRESH MATERIALIZED VIEW CONCURRENTLY {VIEW_NAME};"
+    return f"SELECT {REFRESH_FUNCTION}();"
 
 
 # -- Rationale ------------------------------------------------------------------
