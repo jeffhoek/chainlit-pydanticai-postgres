@@ -140,8 +140,17 @@ BANDS: tuple[tuple[Decimal, str], ...] = (
 
 CVE_ID_PATTERN = re.compile(r"^CVE-\d{4}-\d{4,}$")
 
-# High enough for a realistic patch list, low enough to keep the tool result inside
-# the MAX_OUTPUT_CHARS budget in rag/sql_utils.py. Cheap to raise, awkward to lower.
+# A token-budget judgment call, not a derived limit. Nothing enforces a ceiling here:
+# this tool returns pydantic models straight to the serializer, so MAX_OUTPUT_CHARS in
+# rag/sql_utils.py never applies — that only guards format_query_results, which the
+# `query` tools call and this one does not. At ~400 chars per entry, 25 costs roughly
+# 2.5k tokens of context; 100 would cost 10k.
+#
+# The cap is not what limits how many CVEs can be ranked. Bulk ranking goes through
+# v_cve_risk (`ORDER BY risk_score DESC`), which has no cap and sorts the whole corpus
+# in one query; this tool exists to *explain* a shortlist, not to produce one. Batching
+# a long list through it in chunks of 25 is the anti-pattern the system prompt steers
+# away from. Cheap to raise, awkward to lower.
 MAX_BATCH = 25
 
 VIEW_NAME = "v_cve_risk"
