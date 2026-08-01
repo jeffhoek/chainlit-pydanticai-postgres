@@ -44,6 +44,26 @@ def test_active_record_flattens_all_factors():
     }
 
 
+def test_legacy_virulence_values_are_mapped_to_the_v2_vocabulary():
+    # CISA's 2021-2022 decisions ship inside the ssvcV203 block still using SSVC v1's
+    # "Virulence" names. Verified live on 2026-08-01: CVE-2021-22205 / CVE-2021-40438
+    # carry 'rapid', CVE-2009-3960 / CVE-2017-12615 carry 'slow'.
+    assert extract_ssvc(_metrics_with_options([{"automatable": "rapid"}]))["automatable"] == "yes"
+    assert extract_ssvc(_metrics_with_options([{"automatable": "slow"}]))["automatable"] == "no"
+
+    # 'rapid' is 5 chars; it overflowed the original VARCHAR(4) column and aborted
+    # the entire incremental sync. Nothing may exceed the widened width either.
+    for raw in ("yes", "no", "rapid", "slow"):
+        assert len(extract_ssvc(_metrics_with_options([{"automatable": raw}]))["automatable"]) <= 8
+
+
+def test_current_vocabulary_passes_through_unmapped():
+    assert extract_ssvc(_metrics_with_options([{"automatable": "yes"}]))["automatable"] == "yes"
+    assert extract_ssvc(_metrics_with_options([{"automatable": "no"}]))["automatable"] == "no"
+    # An unrecognized future value is preserved rather than silently dropped.
+    assert extract_ssvc(_metrics_with_options([{"automatable": "maybe"}]))["automatable"] == "maybe"
+
+
 def test_no_ssvc_block_returns_empty_dict():
     # Metrics present (e.g. CVSS only) but no ssvcV203 key.
     assert extract_ssvc({"cvssMetricV31": [{"cvssData": {}}]}) == {}

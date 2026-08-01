@@ -114,7 +114,7 @@ CREATE_STAGING_SQL = """
         published DATE,
         last_modified DATE,
         ssvc_exploitation VARCHAR(8),
-        ssvc_automatable VARCHAR(4),
+        ssvc_automatable VARCHAR(8),
         ssvc_technical_impact VARCHAR(8),
         ssvc_decision VARCHAR(8),
         ssvc_version VARCHAR(8),
@@ -715,9 +715,7 @@ async def backfill_ssvc() -> None:
     conn = await asyncpg.connect(dsn=dsn, timeout=DB_CONNECT_TIMEOUT)
     await conn.execute("SET statement_timeout = 0")
     try:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM nvd_vulnerabilities WHERE raw_json->'metrics' ? 'ssvcV203'"
-        )
+        total = await conn.fetchval("SELECT COUNT(*) FROM nvd_vulnerabilities WHERE raw_json->'metrics' ? 'ssvcV203'")
         print(f"Found {total} records with SSVC data in raw_json")
         if not total:
             return

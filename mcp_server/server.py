@@ -107,7 +107,7 @@ async def query(sql: str) -> str:
       published DATE,
       last_modified DATE,
       ssvc_exploitation VARCHAR(8),     -- none|poc|active (CISA SSVC decision factor)
-      ssvc_automatable VARCHAR(4),      -- yes|no
+      ssvc_automatable VARCHAR(8),      -- yes|no
       ssvc_technical_impact VARCHAR(8), -- partial|total
       ssvc_decision VARCHAR(8),         -- Act|Attend|Track|Track* (usually NULL today)
       ssvc_version VARCHAR(8),          -- SSVC schema version, e.g. '2.0.3'

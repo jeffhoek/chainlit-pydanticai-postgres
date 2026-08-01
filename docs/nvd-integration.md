@@ -94,6 +94,23 @@ promoted from `raw_json` (source: `metrics.ssvcV203`):
 Populate these for already-synced rows with `--backfill-ssvc` (pure SQL/Python,
 no API — reads `raw_json`). KEV-listed CVEs are typically `ssvc_exploitation='active'`.
 
+#### Legacy "Virulence" values in `automatable`
+
+SSVC v1 called this decision point **Virulence** (`slow` / `rapid`); v2 renamed it to
+**Automatable** (`no` / `yes`). CISA's earliest decisions — made in 2021–2022, for CVEs
+as old as CVE-2009-3960 — are back-published *inside* the `ssvcV203` block still carrying
+the v1 value names, even though the block reports `version: 2.0.3`. `extract_ssvc()` maps
+them forward (`slow`→`no`, `rapid`→`yes`) so the column keeps a single `yes|no` domain and
+queries like `WHERE ssvc_automatable = 'yes'` don't silently miss them; `raw_json` always
+retains the original value.
+
+These rows surface unpredictably: NVD only emits them when an unrelated metadata refresh
+touches an old CVE. That is what broke the ETL on 2026-08-01 — `rapid` is 5 characters and
+`ssvc_automatable` was originally `VARCHAR(4)`, so the batch COPY aborted and took the whole
+`NVD full incremental` step down with it (KEV and EPSS were unaffected). The column is now
+`VARCHAR(8)`, matching the other SSVC columns, so an unrecognized future value is stored
+rather than fatal.
+
 ### JSONB paths in `raw_json`
 
 Data not promoted to columns stays queryable via `raw_json`:

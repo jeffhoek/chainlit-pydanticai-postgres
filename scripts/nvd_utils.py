@@ -103,6 +103,15 @@ def extract_cvss_v2(metrics: dict) -> tuple:
     return None, None
 
 
+# SSVC v1 called this decision point "Virulence" with values slow/rapid; v2 renamed
+# it to "Automatable" with no/yes. CISA's oldest decisions (made in 2021-2022) are
+# back-published inside the ssvcV203 block still carrying the v1 value names, so a
+# routine NVD metadata refresh can surface them at any time. Map them forward: the
+# column's documented domain is yes|no, and 'rapid' is also 5 chars — it overflowed
+# the original VARCHAR(4) and broke the whole incremental sync on 2026-08-01.
+AUTOMATABLE_LEGACY_VALUES = {"slow": "no", "rapid": "yes"}
+
+
 def extract_ssvc(metrics: dict) -> dict:
     """Flatten CISA-ADP SSVC v2.0.3 factors into a dict of factor -> value.
 
@@ -111,6 +120,9 @@ def extract_ssvc(metrics: dict) -> dict:
     ``[{"exploitation": "active"}, {"automatable": "yes"}, ...]``; they are merged
     into one flat mapping. Returns ``{}`` when no SSVC block is present. The
     rolled-up ``decision`` (Act/Attend/Track) is usually absent today — see plan.
+
+    ``automatable`` is normalized from the legacy v1 vocabulary; the untouched
+    original is always still available in ``raw_json``.
     """
     for entry in metrics.get("ssvcV203", []):
         data = entry.get("ssvcData", {})
@@ -118,9 +130,10 @@ def extract_ssvc(metrics: dict) -> dict:
         for o in data.get("options", []):
             if isinstance(o, dict):
                 opts.update(o)
+        automatable = opts.get("automatable")
         return {
             "exploitation": opts.get("exploitation"),
-            "automatable": opts.get("automatable"),
+            "automatable": AUTOMATABLE_LEGACY_VALUES.get(automatable, automatable),
             "technical_impact": opts.get("technicalImpact"),
             "decision": opts.get("decision"),  # usually absent today
             "version": data.get("version"),
