@@ -179,9 +179,23 @@ async def record_usage(result) -> bool:
     return allowed
 
 
+async def _echo_as_user(query: str) -> None:
+    """Print a quick-query button's text into the transcript as a user message.
+
+    Chainlit only renders messages the user typed; an action callback otherwise
+    produces an answer with no visible question. Sending a `user_message` step
+    makes a button click read like a normal Q&A turn. `author` mirrors what the
+    frontend stamps on typed messages (the user identifier, else "User").
+    """
+    user = cl.user_session.get("user")
+    author = user.identifier if user else "User"
+    await cl.Message(content=query, type="user_message", author=author).send()
+
+
 @cl.action_callback("quick_query")
 async def on_quick_query(action: cl.Action) -> None:
     query = action.payload["query"]
+    await _echo_as_user(query)
     deps = cl.user_session.get("deps")
     if deps is None:
         await cl.Message(content="Error: Knowledge base not initialized. Please refresh the page.").send()
