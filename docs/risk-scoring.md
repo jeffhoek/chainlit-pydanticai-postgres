@@ -334,17 +334,25 @@ psql "<admin-pooled-supabase-dsn>" -f /tmp/v_cve_risk.sql
 Expect this to take at least as long as the 12.8s query it replaces — it runs the full computation
 once to populate.
 
-Then two grants, and **both are easy to miss**:
+Then three grants, and **all three are easy to miss**:
 
 ```sql
--- The app reads it. DROP removed any previous grant, so this is required on every
--- re-apply, not only the first.
+-- The app reads it.
 GRANT SELECT ON v_cve_risk TO app_readonly;
 
 -- The ETL refreshes it, through the SECURITY DEFINER wrapper rather than directly.
 -- Without this the refresh step fails with "permission denied for materialized view".
 GRANT EXECUTE ON FUNCTION refresh_v_cve_risk() TO app_etl;
+
+-- The ETL also reads the view: refresh_risk_view.py logs the row count back after
+-- refreshing. Without this the refresh succeeds and the script then fails with
+-- "permission denied for materialized view v_cve_risk".
+GRANT SELECT ON v_cve_risk TO app_etl;
 ```
+
+**Both SELECT grants are required on every re-apply**, not only the first: the DDL drops and
+recreates the view, which discards every grant on it. The `EXECUTE` grant survives, since the
+wrapper function is `CREATE OR REPLACE`d rather than dropped.
 
 **Do not try to make `app_etl` the owner instead.** `REFRESH MATERIALIZED VIEW` is owner-only and
 no `GRANT` confers it, so ownership looks like the obvious fix — but it needs two escalations in
@@ -447,6 +455,16 @@ Execution Time: 12769.175 ms
 **12.8 seconds against a ~2s budget.** No index could fix it: `risk_score` is computed, so every
 one of the ~372k rows has to be built before the sort can begin. Materializing is the only lever
 that changes the shape of that work.
+
+After materializing, the same query against the same corpus measured:
+
+```
+Execution Time: 0.843 ms
+```
+
+The rows are precomputed and `v_cve_risk_score_idx` covers the descending order this query asks
+for, so nothing has to be built before the sort. Four orders of magnitude — the shape of the work
+changed, not just its constant factor.
 
 To re-measure after a schema or corpus change:
 
