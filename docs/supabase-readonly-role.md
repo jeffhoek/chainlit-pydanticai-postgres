@@ -48,9 +48,15 @@ GRANT SELECT ON nvd_vulnerabilities TO app_readonly;
 GRANT SELECT ON cwe_definitions TO app_readonly;
 GRANT SELECT ON etl_runs TO app_readonly;
 GRANT SELECT ON epss_scores TO app_readonly;
+GRANT SELECT ON v_cve_risk TO app_readonly;
 ```
 
-Only these tables are granted — no wildcard `ALL TABLES`. Any new table added later requires an explicit grant before `app_readonly` can read it. ALTER DEFAULT PRIVILEGES is an optional way to automate this for future tables:
+`v_cve_risk` is a **materialized** view, and it is created by `init_db()` only when `DB_INIT_SCHEMA=true` — so in production it must be applied with the admin role first (see [risk-scoring.md](risk-scoring.md#production)). Two consequences for roles:
+
+- Re-applying the DDL **drops and recreates** the object, which discards every grant on it — `app_readonly`'s SELECT and `app_etl`'s SELECT alike. Re-issue `GRANT SELECT ON v_cve_risk TO app_readonly` **and** the `app_etl` grant below every time, not just on first deploy. (The grant on the wrapper function survives, since the function is not what gets recreated.)
+- `app_etl` refreshes it through a `SECURITY DEFINER` wrapper, so it needs two grants: `GRANT EXECUTE ON FUNCTION refresh_v_cve_risk() TO app_etl;` for the refresh itself, and `GRANT SELECT ON v_cve_risk TO app_etl;` for the row count `scripts/refresh_risk_view.py` reads back afterwards to log. Without the second, the refresh succeeds and the script then fails with `permission denied for materialized view v_cve_risk`. `REFRESH MATERIALIZED VIEW` is owner-only and no `GRANT` confers it, but making `app_etl` the owner would require granting it `CREATE ON SCHEMA public` — which would let the ETL role create objects in `public` and defeat the no-DDL posture this role exists for. The wrapper runs with the admin's privileges instead, so `app_etl` keeps zero DDL rights. See [risk-scoring.md](risk-scoring.md#production).
+
+Only these objects are granted — no wildcard `ALL TABLES`. Any new table added later requires an explicit grant before `app_readonly` can read it. ALTER DEFAULT PRIVILEGES is an optional way to automate this for future tables:
 
 ```sql
 ALTER DEFAULT PRIVILEGES IN SCHEMA public

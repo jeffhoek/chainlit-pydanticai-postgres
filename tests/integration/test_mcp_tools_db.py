@@ -36,3 +36,25 @@ async def test_retrieve_returns_nonempty_context_string(mcp_context):
     result = await server_module.retrieve("log4j remote code execution")
     assert result.startswith("Retrieved context:")
     assert "Log4Shell" in result
+
+
+async def test_query_can_select_from_the_risk_view(mcp_context):
+    """The view has to exist for the agent, not just for the tool."""
+    result = await server_module.query("SELECT cve_id, risk_score FROM v_cve_risk ORDER BY risk_score DESC LIMIT 5")
+    assert "risk_score" in result
+    assert "row(s) returned." in result
+
+
+async def test_risk_score_returns_a_scored_entry(mcp_context):
+    (result,) = await server_module.risk_score(["CVE-2021-44228"])
+
+    assert result.cve_id == "CVE-2021-44228"
+    assert 0 <= result.score <= 100
+    assert result.band in ("low", "moderate", "high", "critical")
+    assert result.rationale
+
+
+async def test_risk_score_rejects_a_malformed_id(mcp_context):
+    result = await server_module.risk_score(["not-a-cve"])
+    assert isinstance(result, str)
+    assert "malformed" in result

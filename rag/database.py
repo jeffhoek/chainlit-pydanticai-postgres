@@ -2,6 +2,7 @@ import asyncpg
 from pgvector.asyncpg import register_vector
 
 from config import settings
+from rag.risk import view_ddl
 
 _pool: asyncpg.Pool | None = None
 
@@ -217,6 +218,14 @@ async def init_db() -> asyncpg.Pool:
     if settings.db_init_schema:
         async with _pool.acquire() as conn:
             await conn.execute(SCHEMA_SQL)
+            # v_cve_risk is generated from the constants in rag/risk.py rather than
+            # written out here, so the composite-score arithmetic has one home. It
+            # must run after SCHEMA_SQL — the view reads all four base tables.
+            #
+            # Production runs DB_INIT_SCHEMA=false, so the view does NOT appear just
+            # because it is in this code path; apply it with the admin role and
+            # GRANT SELECT to app_readonly (see docs/risk-scoring.md).
+            await conn.execute(view_ddl())
 
     return _pool
 

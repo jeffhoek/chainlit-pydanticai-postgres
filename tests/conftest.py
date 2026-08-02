@@ -20,6 +20,7 @@ import pytest
 from pgvector.asyncpg import register_vector
 
 from rag.database import SCHEMA_SQL
+from rag.risk import refresh_sql, view_ddl
 from rag.vector_store import PgVectorStore
 
 # Unit embeddings used for seeded golden data.
@@ -34,6 +35,9 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
 
 async def _seed_tables(conn: asyncpg.Connection) -> None:
     await conn.execute(SCHEMA_SQL)
+    # view_ddl() drops and recreates, so a stale v_cve_risk from an earlier revision
+    # of rag/risk.py can't wedge the run.
+    await conn.execute(view_ddl())
     await conn.execute(
         """
         INSERT INTO kev_vulnerabilities (cve_id, content, embedding)
@@ -56,6 +60,10 @@ async def _seed_tables(conn: asyncpg.Connection) -> None:
         "PrintNightmare Windows Print Spooler privilege escalation vulnerability",
         np.array(GOLDEN_NVD_EMBEDDING, dtype=np.float32),
     )
+    # v_cve_risk is materialized — a snapshot, not a live query — so rows inserted
+    # after it was created are invisible until refreshed. Every fixture that seeds
+    # data the view should see has to do this.
+    await conn.execute(refresh_sql())
 
 
 @pytest.fixture(scope="session")

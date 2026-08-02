@@ -11,6 +11,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from config import settings
 from rag.embeddings import generate_embedding
+from rag.risk import RiskScore, score_cves
 from rag.sql_utils import apply_row_limit, format_query_results, validate_sql
 from rag.vector_store import PgVectorStore
 
@@ -66,6 +67,41 @@ async def retrieve(query: str) -> str:
 
     context = "\n\n---\n\n".join(results)
     return f"Retrieved context:\n\n{context}"
+
+
+@mcp.tool
+async def risk_score(cve_ids: list[str]) -> list[RiskScore] | str:
+    """Composite 0-100 risk score for specific CVEs, with a per-signal breakdown.
+
+    Blends CVSS severity, EPSS likelihood, KEV listing, SSVC urgency, and CWE
+    weakness class into one number. Use this for a handful of NAMED CVEs. For
+    ranking, filtering, or counting across the corpus, query the `v_cve_risk` view
+    with the `query` tool instead — one ORDER BY beats 25 tool calls.
+
+    The score is a blend, not a fifth signal: when the question is specifically
+    about likelihood or severity, cite epss_probability or cvss_score directly.
+    Bands are relative to this corpus: 0-24 low, 25-44 moderate, 45-64 high,
+    65-100 critical (critical effectively requires KEV listing).
+
+    Args:
+        cve_ids: CVE IDs to score, e.g. ["CVE-2021-44228"]. At most 25 per call;
+            they are ranked highest-risk first in the result.
+
+    Returns:
+        One entry per CVE with score, band, weighted components, and a rationale;
+        an entry with a null score means the CVE is in neither KEV nor NVD.
+    """
+    if _mcp_context is None:
+        return "Error: MCP context not initialised."
+
+    try:
+        return await score_cves(_mcp_context.pool, cve_ids)
+    except asyncpg.PostgresError as e:
+        logger.warning("Database error in MCP risk_score tool: %s", e)
+        return "Error: Database error computing risk scores."
+    except Exception:
+        logger.exception("Unexpected error in MCP risk_score tool")
+        return "Error: Internal error computing risk scores."
 
 
 @mcp.tool
@@ -132,6 +168,24 @@ async def query(sql: str) -> str:
       previous_scored_at DATE
     )
 
+    All four signals pre-blended and pre-joined, one row per CVE in NVD or KEV:
+
+    VIEW v_cve_risk (
+      cve_id VARCHAR(20),
+      risk_score NUMERIC(4,1),          -- 0-100 composite; see Composite Risk Score below
+      c_cvss, c_epss, c_kev, c_ransomware, c_ssvc, c_cwe NUMERIC,  -- weighted contributions
+      cvss_score NUMERIC(3,1),          -- COALESCE(v3.1, v2)
+      cvss_imputed BOOLEAN,             -- TRUE when neither CVSS version exists (neutral prior used)
+      epss_probability, epss_percentile NUMERIC(6,5),
+      epss_previous_probability NUMERIC(6,5), epss_previous_scored_at DATE,
+      epss_scored_at DATE,
+      kev_listed BOOLEAN,
+      kev_date_added DATE,
+      known_ransomware_campaign_use VARCHAR(20),
+      ssvc_exploitation, ssvc_automatable, ssvc_technical_impact VARCHAR,
+      cwe_top VARCHAR(20)               -- highest-severity rated CWE, NULL if none rated
+    )
+
     JOIN kev_vulnerabilities and nvd_vulnerabilities on cve_id. Resolve CWE IDs
     to names via cwe_id = ANY(nvd_vulnerabilities.cwes) or
     cwe_id = ANY(kev_vulnerabilities.cwes).
@@ -161,6 +215,27 @@ async def query(sql: str) -> str:
       filter written against cvss_v31_score therefore drops every pre-2015 CVE
       from an EPSS comparison — use COALESCE(cvss_v31_score, cvss_v2_score)
       whenever a severity threshold is combined with EPSS.
+
+    Composite Risk Score (v_cve_risk — the four signals pre-blended):
+    - risk_score is a BLEND, not a fifth signal. When the question is specifically
+      about likelihood or severity, cite epss_probability or cvss_score directly.
+    - Bands are relative to this corpus, not absolute: 0-24 low, 25-44 moderate,
+      45-64 high, 65-100 critical. Critical effectively requires KEV listing; a CVE
+      not on KEV tops out around 61, so 45+ without KEV is the early-warning signal.
+    - cvss_imputed = TRUE means the CVSS input was a neutral 5.0 prior, NOT a
+      measured score (the CVE has not been assessed yet). Say so when reporting such
+      a CVE, and filter with WHERE NOT cvss_imputed when precision matters.
+    - Use the `risk_score` TOOL for a handful of named CVEs; use this view for
+      ranking, filtering, and counting.
+    Example queries:
+    - What to patch first: SELECT cve_id, risk_score, cvss_score, epss_probability,
+      kev_listed FROM v_cve_risk ORDER BY risk_score DESC LIMIT 20;
+    - Early warning: SELECT cve_id, risk_score, epss_probability, epss_percentile
+      FROM v_cve_risk WHERE NOT kev_listed AND risk_score >= 45
+      ORDER BY risk_score DESC;
+    - Band distribution: SELECT CASE WHEN risk_score >= 65 THEN 'critical' WHEN
+      risk_score >= 45 THEN 'high' WHEN risk_score >= 25 THEN 'moderate' ELSE 'low'
+      END AS band, COUNT(*) FROM v_cve_risk GROUP BY 1 ORDER BY 1;
 
     Args:
         sql: A read-only SELECT statement against the tables above.
