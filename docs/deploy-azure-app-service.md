@@ -278,6 +278,16 @@ az role assignment create \
 > `CHAINLIT_URL=https://<appServiceName>.azurewebsites.net` to fix this. If you see
 > that error, confirm the setting is present:
 > `az webapp config appsettings list -g rg-vulncopilot-dev -n app-vulncopilot-dev --query "[?name=='CHAINLIT_URL']"`.
+>
+> **Same setting, different symptom — a 404 after the GitHub consent screen.** If
+> `CHAINLIT_URL` points at a host that no longer serves this app (e.g. a custom
+> domain that has since been repointed elsewhere), GitHub accepts the
+> `redirect_uri` and sends the browser to that host's
+> `/auth/oauth/github/callback`, where nothing answers. The fix is the same
+> command with the host you are actually browsing, plus a matching callback URL on
+> the OAuth App. `CHAINLIT_URL` comes from the `publicUrl` bicep param, so update
+> `parameters.<env>.bicepparam` too or the next deployment resets it — see
+> [Reverting off the apex](../plans/custom-domain-cloudflare.md#reverting-off-the-apex).
 
 Use the bash `for` loop with `read` shell built-in to securely enter the env vars:
 ```bash

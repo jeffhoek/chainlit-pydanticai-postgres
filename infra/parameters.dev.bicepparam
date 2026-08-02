@@ -14,12 +14,15 @@ param logfireEnabled = true
 param openRegistration = false
 param allowedLogins = '["jeffhoek"]'
 
-// Custom domain (see plans/custom-domain-cloudflare.md). DNS (CNAME + asuid TXT,
-// grey-cloud) and the hostname binding are live for dev, so certs are enabled.
-// publicUrl fixes the OAuth redirect_uri onto the apex host.
-param publicUrl = 'https://vulncopilot.org'
-param customDomain = 'vulncopilot.org'
-param deployCustomDomainCerts = true
+// Custom domain (see plans/custom-domain-cloudflare.md). vulncopilot.org now
+// resolves to the GCP deployment, so the apex is no longer this app's public
+// host: empty publicUrl puts CHAINLIT_URL (the OAuth redirect_uri host) and
+// MCP_ALLOWED_HOSTS back on app-vulncopilot-dev.azurewebsites.net, and the cert
+// params are off because managed-certificate issuance/renewal validates DNS,
+// which would now fail. Restore all three together if the apex ever points back.
+param publicUrl = ''
+param customDomain = ''
+param deployCustomDomainCerts = false
 
 // ETL refresh schedule (UTC cron). Start frequent while validating, then dial back:
 //   '0 6,18 * * *' — twice daily, 06:00 + 18:00 UTC (bootstrap / watching it work)
