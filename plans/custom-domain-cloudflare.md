@@ -2,6 +2,8 @@
 
 Runbook for putting the Azure App Service dev deployment (`app-vulncopilot-dev.azurewebsites.net`) behind the custom domain **vulncopilot.org**, registered at Cloudflare.
 
+> **Superseded (2026-08-01).** vulncopilot.org now resolves to the **GCP deployment with the Mastra frontend**. The Azure App Service is back on its `azurewebsites.net` host, and [infra/parameters.dev.bicepparam](../infra/parameters.dev.bicepparam) has `publicUrl`/`customDomain` empty with `deployCustomDomainCerts = false` — see [Reverting off the apex](#reverting-off-the-apex) below. Keep this runbook for the mechanics if the apex (or another domain) is ever pointed back at Azure.
+
 ## Context
 
 The app is a Chainlit chatbot: it needs **WebSockets** and relies on **ARR sticky sessions** (`clientAffinityEnabled: true`). App Service terminates TLS at the front end and forwards plain HTTP to the container, so Chainlit builds its OAuth `redirect_uri` from the `CHAINLIT_URL` env var rather than the incoming request. Two app-specific values are therefore coupled to the hostname and must change alongside DNS:
@@ -162,7 +164,7 @@ Then in a browser:
 These are **already implemented** in bicep so Step 5 isn't reverted and future
 environments don't re-hit the tag policy:
 
-1. **Public URL parametrized.** `publicUrl` param on [main.bicep](../infra/main.bicep) → [app-service.bicep](../infra/modules/app-service.bicep), defaulting empty (falls back to the `azurewebsites.net` host). `CHAINLIT_URL` is set from it. Dev value `https://vulncopilot.org` in [parameters.dev.bicepparam](../infra/parameters.dev.bicepparam).
+1. **Public URL parametrized.** `publicUrl` param on [main.bicep](../infra/main.bicep) → [app-service.bicep](../infra/modules/app-service.bicep), defaulting empty (falls back to the `azurewebsites.net` host). `CHAINLIT_URL` and `MCP_ALLOWED_HOSTS` are both set from it. Dev value is now empty (see the superseded note at the top); it was `https://vulncopilot.org` while the apex pointed at Azure.
 2. **Managed certs declared** as `Microsoft.Web/certificates` with `tags` applied, gated behind `deployCustomDomainCerts` + `customDomain`. Same resource names as the CLI created (`cert-vulncopilot-org`, `cert-www-vulncopilot-org`), so a deploy reconciles them in place rather than duplicating.
 
 > **Deploy ordering.** Don't run the bicep deployment until the manual Steps 3–4
@@ -177,6 +179,34 @@ environments don't re-hit the tag policy:
 - DNS is authoritative at Cloudflare — deleting the CNAME/TXT records reverts traffic; the `azurewebsites.net` host keeps working throughout.
 - Revert `CHAINLIT_URL` and the OAuth callback URL to the `azurewebsites.net` values.
 - Custom hostname bindings and certs can be removed with `az webapp config hostname delete` / `ssl unbind` without affecting the default host.
+
+## Reverting off the apex
+
+What was done on 2026-08-01 when vulncopilot.org was repointed to the GCP/Mastra
+deployment. The symptom of doing only part of this: GitHub login on the Azure app
+completes at github.com and then **404s**, because Chainlit built the
+`redirect_uri` from the stale `CHAINLIT_URL` and GitHub returned the browser to
+`https://vulncopilot.org/auth/oauth/github/callback` — a host that no longer runs
+Chainlit and has no such route.
+
+1. **`CHAINLIT_URL` back to the default host** — the fix that actually clears the 404:
+   ```bash
+   az webapp config appsettings set -g rg-vulncopilot-dev -n app-vulncopilot-dev --settings CHAINLIT_URL=https://app-vulncopilot-dev.azurewebsites.net
+   ```
+2. **GitHub OAuth App callback** back to
+   `https://app-vulncopilot-dev.azurewebsites.net/auth/oauth/github/callback`
+   (homepage URL to the same host). A GitHub OAuth App holds exactly **one**
+   callback URL, so if the apex deployment also uses GitHub OAuth it needs its own
+   OAuth App — see [docs/public-access-setup.md](../docs/public-access-setup.md).
+3. **bicepparam** — `publicUrl = ''`, `customDomain = ''`,
+   `deployCustomDomainCerts = false` in
+   [parameters.dev.bicepparam](../infra/parameters.dev.bicepparam). Without step 3
+   the next `az deployment` silently restores the apex values and re-breaks login;
+   leaving the cert params on would also fail issuance/renewal, since managed-cert
+   validation checks DNS that now resolves to GCP.
+4. **Leftover Azure hostname bindings/certs** for the apex can be dropped with
+   `az webapp config hostname delete` / `az webapp config ssl unbind` — optional,
+   but they will otherwise sit there failing renewal.
 
 ## Optional follow-up — enable Cloudflare proxy (Path B)
 

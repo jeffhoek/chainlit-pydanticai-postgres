@@ -10,6 +10,13 @@ file says *what to do*; this one says *what actually happened and how it was ver
 Kept so the exercise doesn't have to be reverse-engineered later — especially the
 custom-domain/cert mechanics, which are the least obvious part.
 
+> **Historical as of 2026-08-01.** vulncopilot.org has since been repointed to the
+> GCP/Mastra deployment, and this Azure app is back on
+> `app-vulncopilot-dev.azurewebsites.net` (`publicUrl`/`customDomain` empty, certs
+> off). The `CHAINLIT_URL = https://vulncopilot.org` readings below are the values
+> *at cutover time*, not current. See
+> [Reverting off the apex](../plans/custom-domain-cloudflare.md#reverting-off-the-apex).
+
 ## Ground rules that made this safe
 
 - **Blue/green, not in-place.** RGs, ACR, and the App Service hostname can't be

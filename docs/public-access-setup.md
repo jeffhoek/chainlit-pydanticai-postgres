@@ -28,6 +28,24 @@ For local development, set the Homepage/callback URLs to `http://localhost:8000`
 and `http://localhost:8000/auth/oauth/github/callback`. GitHub allows
 `http://localhost` for OAuth apps; production must use HTTPS.
 
+### One OAuth App per host
+
+A GitHub OAuth App holds exactly **one** Authorization callback URL, so every
+deployment on its own hostname needs its own OAuth App and its own client
+ID/secret. Current split:
+
+| Deployment | Host | OAuth App |
+|---|---|---|
+| GCP (Mastra frontend) | `vulncopilot.org` | "Vulncopilot PROD" |
+| Azure App Service (Chainlit) | `app-vulncopilot-dev.azurewebsites.net` | separate app |
+| Local | `http://localhost:8000` | separate app |
+
+The callback URL must also match the app's own `CHAINLIT_URL` exactly — Chainlit
+builds the `redirect_uri` from that env var, not from the incoming request, so a
+stale value sends users to a host that 404s after the consent screen. See the
+[`CHAINLIT_URL` gotcha](deploy-azure-app-service.md#41-set-the-secrets) for the
+Azure fix.
+
 ## Environment Variable Reference
 
 | Variable | Default | Description |
