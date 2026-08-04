@@ -42,6 +42,7 @@ from pgvector.asyncpg import register_vector
 from pgvector.vector import Vector
 
 from config import settings
+from rag.embeddings import generate_embeddings_batch
 from scripts.etl_report import LoaderReport
 from scripts.nvd_utils import (
     build_content,
@@ -313,7 +314,7 @@ async def generate_embeddings(
     all_embeddings: list[list[float]] = []
     for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
         batch = texts[i : i + EMBEDDING_BATCH_SIZE]
-        batch_embeddings = await _embed_with_token_limit(openai_client, batch)
+        batch_embeddings = await generate_embeddings_batch(openai_client, batch, label="Embedding")
         all_embeddings.extend(batch_embeddings)
         batch_done = already_loaded + min(i + EMBEDDING_BATCH_SIZE, len(texts))
         suffix = f"/{total}" if total else ""
@@ -573,51 +574,6 @@ BACKFILL_MAX_RETRIES = 5
 
 # -- Backfill embeddings --
 
-# OpenAI allows max 300k tokens per embedding request; rough estimate ~4 chars/token.
-# Use a conservative limit to stay safely under the cap.
-MAX_TOKENS_PER_REQUEST = 250_000
-CHARS_PER_TOKEN_ESTIMATE = 4
-MAX_CHARS_PER_TEXT = 8000 * 4  # ~8000 tokens per input, model hard limit is 8191
-
-
-async def _embed_with_token_limit(openai_client: AsyncOpenAI, texts: list[str]) -> list[list[float]]:
-    """Split texts into sub-batches that fit within the API token limit and embed them."""
-    sub_batches: list[list[str]] = []
-    current_batch: list[str] = []
-    current_tokens = 0
-
-    for text in texts:
-        text = text[:MAX_CHARS_PER_TEXT]
-        est_tokens = len(text) // CHARS_PER_TOKEN_ESTIMATE
-        if current_batch and current_tokens + est_tokens > MAX_TOKENS_PER_REQUEST:
-            sub_batches.append(current_batch)
-            current_batch = []
-            current_tokens = 0
-        current_batch.append(text)
-        current_tokens += est_tokens
-
-    if current_batch:
-        sub_batches.append(current_batch)
-
-    all_embeddings: list[list[float]] = []
-    for i, batch in enumerate(sub_batches):
-        if len(sub_batches) > 1:
-            print(f"    Embedding sub-batch {i + 1}/{len(sub_batches)} ({len(batch)} texts)")
-        for embed_attempt in range(3):
-            try:
-                resp = await openai_client.embeddings.create(model=settings.embedding_model, input=batch, timeout=60)
-                all_embeddings.extend(item.embedding for item in resp.data)
-                break
-            except Exception as e:
-                if embed_attempt < 2:
-                    wait = 2**embed_attempt
-                    print(f"  Embedding API error: {e}, retrying in {wait}s...")
-                    await asyncio.sleep(wait)
-                else:
-                    raise
-
-    return all_embeddings
-
 
 async def _backfill_batch(dsn: str, openai_client: AsyncOpenAI) -> int:
     """Fetch one batch of rows missing embeddings, generate and save them. Returns count processed."""
@@ -644,7 +600,7 @@ async def _backfill_batch(dsn: str, openai_client: AsyncOpenAI) -> int:
             texts = [row["content"] for row in rows]
             cve_ids = [row["cve_id"] for row in rows]
 
-            embeddings = await _embed_with_token_limit(openai_client, texts)
+            embeddings = await generate_embeddings_batch(openai_client, texts, label="Backfill")
 
             embedding_vectors = [Vector(emb) for emb in embeddings]
             await conn.execute(
