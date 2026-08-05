@@ -17,6 +17,8 @@ failed run.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from openai import AsyncOpenAI, BadRequestError
 
@@ -39,6 +41,24 @@ MIN_CHARS_PER_TOKEN = 2
 
 REQUEST_TIMEOUT = 60
 MAX_RETRIES = 3
+
+
+@asynccontextmanager
+async def embedding_client(enabled: bool = True) -> AsyncIterator[AsyncOpenAI | None]:
+    """Yield an ``AsyncOpenAI`` client (or None when disabled) and always close it.
+
+    Closing matters more than usual here: `run_etl.py` runs each loader under its
+    own `asyncio.run()`, so a client left open outlives the event loop it was
+    built on. Its finalizer then schedules `aclose()` against a closed loop, and
+    the resulting "Event loop is closed" traceback surfaces whenever the garbage
+    collector happens to fire — misattributed to whichever step is running then.
+    """
+    client = AsyncOpenAI(api_key=settings.openai_api_key) if enabled else None
+    try:
+        yield client
+    finally:
+        if client is not None:
+            await client.close()
 
 
 async def generate_embedding(client: AsyncOpenAI, text: str) -> list[float]:

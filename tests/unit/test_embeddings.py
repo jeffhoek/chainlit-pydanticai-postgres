@@ -10,6 +10,7 @@ from rag.embeddings import (
     MAX_TOKENS_PER_REQUEST,
     MIN_CHARS_PER_TOKEN,
     batch_texts_by_tokens,
+    embedding_client,
     estimate_tokens,
     generate_embedding,
     generate_embeddings_batch,
@@ -175,3 +176,52 @@ async def test_generate_embeddings_batch_returns_one_vector_per_text_across_requ
     assert len(result) == len(texts)
     assert client.embeddings.create.await_count >= 3
     assert [v[0] for v in result] == [float(len(t)) for t in texts]
+
+
+# -- Client lifecycle --
+
+
+class _FakeAsyncOpenAI:
+    """Stand-in that records whether close() was awaited."""
+
+    instances: list["_FakeAsyncOpenAI"] = []
+
+    def __init__(self, **kwargs):
+        self.closed = False
+        _FakeAsyncOpenAI.instances.append(self)
+
+    async def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_openai(monkeypatch):
+    _FakeAsyncOpenAI.instances = []
+    monkeypatch.setattr("rag.embeddings.AsyncOpenAI", _FakeAsyncOpenAI)
+    return _FakeAsyncOpenAI
+
+
+async def test_embedding_client_closes_on_normal_exit(mock_settings, fake_openai):
+    """An unclosed client outlives its asyncio.run() loop and logs a bogus traceback later."""
+    async with embedding_client() as client:
+        assert client is not None
+        assert client.closed is False
+
+    assert len(fake_openai.instances) == 1
+    assert fake_openai.instances[0].closed is True
+
+
+async def test_embedding_client_closes_when_body_raises(mock_settings, fake_openai):
+    with pytest.raises(ValueError):
+        async with embedding_client():
+            raise ValueError("loader blew up mid-run")
+
+    assert fake_openai.instances[0].closed is True
+
+
+async def test_embedding_client_disabled_yields_none_and_builds_nothing(mock_settings, fake_openai):
+    """--skip-embeddings must not construct a client it would then have to close."""
+    async with embedding_client(enabled=False) as client:
+        assert client is None
+
+    assert fake_openai.instances == []

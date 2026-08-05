@@ -18,7 +18,7 @@ from openai import AsyncOpenAI
 from pgvector.asyncpg import register_vector
 
 from config import settings
-from rag.embeddings import generate_embeddings_batch
+from rag.embeddings import embedding_client, generate_embeddings_batch
 from scripts.etl_report import LoaderReport
 
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
@@ -137,8 +137,8 @@ async def run() -> LoaderReport:
     contents = [build_content(v) for v in vulns]
 
     print("Generating embeddings...")
-    openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-    embeddings = await generate_embeddings(openai_client, contents)
+    async with embedding_client() as openai_client:
+        embeddings = await generate_embeddings(openai_client, contents)
 
     print("Connecting to PostgreSQL...")
     conn = await asyncpg.connect(dsn=settings.get_database_dsn())
