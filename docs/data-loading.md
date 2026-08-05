@@ -64,6 +64,22 @@ below.
 | `scripts/load_cwe.py` | MITRE CWE definitions | ~900 | Resolves opaque CWE IDs to human-readable weakness names/descriptions |
 | `scripts/load_epss.py` | FIRST.org EPSS daily scores | ~353,000 | Exploitation-likelihood signal for prioritization; leading indicator to KEV |
 
+### Embedding batch sizing
+
+Every loader routes embedding requests through `rag.embeddings.generate_embeddings_batch`,
+which packs inputs against the API's 300k-tokens-per-request cap rather than a fixed item
+count. Item count alone is not safe: 500 CVEs is ~96k tokens of ordinary advisory prose but
+~305k when the window is dominated by Linux-kernel CVEs, whose stack traces and symbol names
+tokenize about twice as densely.
+
+Token counts are estimated from character length (a pessimistic 2 chars/token floor) rather
+than measured with a tokenizer, because the k8s deployment currently runs behind a strict
+egress allowlist that does not include tiktoken's BPE download host. That is a deployment
+posture rather than a hard constraint — if the allowlist gains that host, exact `tiktoken`
+counting drops straight into `estimate_tokens`. Either way, if the estimate is too low the
+loader halves the batch on the API's "maximum request size" 400 and retries, so a bad
+estimate costs an extra request instead of a failed run.
+
 ### 1. Load CISA KEV data
 
 Fetches the CISA KEV catalog and generates OpenAI embeddings:

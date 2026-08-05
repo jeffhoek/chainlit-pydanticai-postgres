@@ -18,6 +18,7 @@ from openai import AsyncOpenAI
 from pgvector.asyncpg import register_vector
 
 from config import settings
+from rag.embeddings import generate_embeddings_batch
 from scripts.etl_report import LoaderReport
 
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
@@ -60,8 +61,7 @@ async def generate_embeddings(openai_client: AsyncOpenAI, texts: list[str]) -> l
     all_embeddings = []
     for i in range(0, len(texts), BATCH_SIZE):
         batch = texts[i : i + BATCH_SIZE]
-        resp = await openai_client.embeddings.create(model=settings.embedding_model, input=batch)
-        all_embeddings.extend([item.embedding for item in resp.data])
+        all_embeddings.extend(await generate_embeddings_batch(openai_client, batch, label="Embedding"))
         print(f"  Embedded {min(i + BATCH_SIZE, len(texts))}/{len(texts)}")
     return all_embeddings
 
