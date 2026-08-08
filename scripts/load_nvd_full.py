@@ -42,7 +42,7 @@ from pgvector.asyncpg import register_vector
 from pgvector.vector import Vector
 
 from config import settings
-from rag.embeddings import generate_embeddings_batch
+from rag.embeddings import embedding_client, generate_embeddings_batch
 from scripts.etl_report import LoaderReport
 from scripts.nvd_utils import (
     build_content,
@@ -400,16 +400,15 @@ async def full_load(args) -> None:
 
     first_page, total_results, total_pages = await _get_total_results(start_index)
 
-    openai_client = None
-    if not args.skip_embeddings:
-        openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-
     started_at = time.time()
     total_loaded = 0
     current_index = start_index
     page_num = current_index // RESULTS_PER_PAGE + 1
 
-    async with httpx.AsyncClient(timeout=60) as session:
+    async with (
+        embedding_client(not args.skip_embeddings) as openai_client,
+        httpx.AsyncClient(timeout=60) as session,
+    ):
         while current_index < total_results:
             if args.limit and page_num > args.limit + (start_index // RESULTS_PER_PAGE):
                 print(f"Reached page limit ({args.limit}), stopping.")
@@ -520,15 +519,14 @@ async def incremental_sync(since: str | None = None, skip_embeddings: bool = Fal
         mod_high_water = datetime.combine(row["max_modified"], datetime.min.time(), tzinfo=UTC)
         pub_high_water = datetime.combine(row["max_published"], datetime.min.time(), tzinfo=UTC)
 
-    openai_client = None
-    if not skip_embeddings:
-        openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-
     new_loaded = 0
     modified_loaded = 0
     started_at = time.time()
 
-    async with httpx.AsyncClient(timeout=60) as session:
+    async with (
+        embedding_client(not skip_embeddings) as openai_client,
+        httpx.AsyncClient(timeout=60) as session,
+    ):
         # Phase 1: newly published CVEs
         print(f"\nPhase 1 — new CVEs published from {pub_high_water.date()} to {now.date()}")
         window_start = pub_high_water
@@ -636,7 +634,6 @@ async def backfill_embeddings() -> None:
     )
 
     dsn = settings.get_database_dsn()
-    openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
 
     conn = await asyncpg.connect(dsn=dsn, timeout=DB_CONNECT_TIMEOUT)
     await conn.execute("SET statement_timeout = 0")
@@ -649,12 +646,13 @@ async def backfill_embeddings() -> None:
         return
 
     processed = 0
-    while processed < total:
-        batch_count = await _backfill_batch(dsn, openai_client)
-        if batch_count == 0:
-            break
-        processed += batch_count
-        print(f"  Backfilled {processed}/{total}")
+    async with embedding_client() as openai_client:
+        while processed < total:
+            batch_count = await _backfill_batch(dsn, openai_client)
+            if batch_count == 0:
+                break
+            processed += batch_count
+            print(f"  Backfilled {processed}/{total}")
 
     print(f"Done! Backfilled embeddings for {processed} records")
 

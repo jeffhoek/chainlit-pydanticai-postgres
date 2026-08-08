@@ -27,7 +27,7 @@ from openai import AsyncOpenAI
 from pgvector.asyncpg import register_vector
 
 from config import settings
-from rag.embeddings import generate_embeddings_batch
+from rag.embeddings import embedding_client, generate_embeddings_batch
 from scripts.nvd_utils import (
     build_content,
     extract_affected_products,
@@ -255,11 +255,10 @@ async def main() -> None:
     # Process in batches: fetch → embed → upsert, then move to next batch.
     # A fresh DB connection is opened for each upsert to avoid idle timeout.
     print(f"Fetching {len(new_ids)} CVEs from NVD API (batch size: {BATCH_SIZE})...")
-    openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
     total_loaded = 0
     total_skipped = 0
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with embedding_client() as openai_client, httpx.AsyncClient(timeout=30) as client:
         for batch_start in range(0, len(new_ids), BATCH_SIZE):
             batch_ids = new_ids[batch_start : batch_start + BATCH_SIZE]
             batch_num = batch_start // BATCH_SIZE + 1
