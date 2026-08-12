@@ -71,6 +71,11 @@ ignore = [
 # bound parameters, never through here. A noqa can't be placed on the offending line
 # because it is the opening quote of a multi-line string.
 "rag/risk.py" = ["S608"]
+# Same shape in database.py: RLS_SQL interpolates one module constant, the RLS_TABLES
+# tuple of literal table names. Role names inside the generated PL/pgSQL come from
+# pg_catalog through quote_ident(), and table names through format()'s %I — the
+# identifier quoting the linter can't see because it happens in the database.
+"rag/database.py" = ["S608"]
 
 [tool.ruff.format]
 quote-style = "double"

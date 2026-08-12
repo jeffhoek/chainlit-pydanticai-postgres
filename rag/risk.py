@@ -380,6 +380,26 @@ AS $$ REFRESH MATERIALIZED VIEW CONCURRENTLY {VIEW_NAME} $$;
 
 -- Not executable by the world just because it is definer-privileged.
 REVOKE ALL ON FUNCTION {REFRESH_FUNCTION}() FROM PUBLIC;
+
+-- PostgreSQL does not support RLS on materialized views, so the protection every base
+-- table gets from RLS_SQL (rag/database.py) is simply unavailable here — and this view
+-- is a denormalized join across all four of them, which makes it the most useful single
+-- object on the API surface. Revoking the grant is the only lever there is.
+--
+-- This has to live inside view_ddl() rather than beside the other RLS statements: the
+-- DROP/CREATE above discards every privilege on the view, so a revoke applied elsewhere
+-- would be silently undone the next time the score arithmetic changed. Guarded on role
+-- existence for the same reason as RLS_SQL — `anon` is Supabase-only.
+DO $$
+DECLARE api_roles text;
+BEGIN
+    SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO api_roles
+    FROM pg_roles WHERE rolname IN ('anon', 'authenticated');
+
+    IF api_roles IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON {VIEW_NAME} FROM %s', api_roles);
+    END IF;
+END $$;
 """.strip()
 
 
