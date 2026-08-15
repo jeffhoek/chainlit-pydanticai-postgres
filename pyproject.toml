@@ -14,7 +14,10 @@ dependencies = [
     "httpx>=0.28.0",
     "openai>=2.17.0",
     "pgvector>=0.4.0",
-    "pydantic-ai>=1.38.0",
+    # Capped below v2: the CVE fixes this refresh needs all land in the v1 line
+    # (>=1.106.0). The v2 major is a separate migration — see
+    # plans/pydantic-ai-v2-migration.md — and needs code changes in app.py.
+    "pydantic-ai>=1.106.0,<2",
     "pydantic-settings>=2.12.0",
     "python-dotenv>=1.2.1",
     "langfuse>=3.0.0",
@@ -22,6 +25,7 @@ dependencies = [
     "logfire>=4.27.0",
     "azure-communication-email>=1.0.0",
     "jinja2>=3.1.6",
+    "numpy>=2.5.2",
 ]
 
 [project.urls]
