@@ -1,0 +1,47 @@
+version: 2
+updates:
+  # Python app dependencies (pyproject.toml + uv.lock)
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+      azure:
+        patterns:
+          - "azure-*"
+      observability:
+        patterns:
+          - "langfuse"
+          - "logfire"
+
+  # GitHub Actions used by test.yml, deploy.yml, claude.yml
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # Base images in Dockerfile and docker-compose.yaml
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 14
+      semver-major-days: 30
