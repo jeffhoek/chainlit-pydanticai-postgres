@@ -54,21 +54,27 @@ async def etl_stats_page() -> str:
 
 
 def _prioritize_route(path: str) -> None:
-    """Move a route ahead of Chainlit's SPA catch-all so it isn't shadowed.
+    """Move a route to the front of the table so Chainlit's SPA catch-all can't shadow it.
 
     Chainlit registers a greedy "/{full_path:path}" route at import time. Starlette
-    matches routes in registration order, so a route appended afterwards never wins —
-    the catch-all serves the frontend instead and the client redirects to "/". Re-order
-    our route to sit just before the catch-all.
+    matches in registration order, so a route appended afterwards never wins — the
+    catch-all serves the frontend instead and the client redirects to "/".
+
+    This used to insert just before the route whose path was "/{full_path:path}".
+    FastAPI 0.141 stopped flattening `include_router` into the parent list and wraps
+    included routes in an opaque `_IncludedRouter` with no `.path`, so that search
+    silently found nothing, fell back to appending at the end, and put our routes
+    *behind* the catch-all — serving the SPA shell for /admin, which reads as an
+    unauthenticated 200 rather than the Basic-Auth 401.
+
+    Insert at the front instead. `path` is always a literal with no parameters, so it
+    can only ever match itself and cannot shadow anything registered after it. That
+    holds regardless of how FastAPI or Chainlit arrange their routers.
     """
     routes = fastapi_app.router.routes
     ours = next(r for r in routes if getattr(r, "path", None) == path)
     routes.remove(ours)
-    idx = next(
-        (i for i, r in enumerate(routes) if getattr(r, "path", None) == "/{full_path:path}"),
-        len(routes),
-    )
-    routes.insert(idx, ours)
+    routes.insert(0, ours)
 
 
 _prioritize_route("/etl-stats")

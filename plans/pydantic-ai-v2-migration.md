@@ -1,6 +1,8 @@
 # Migrate to Pydantic AI v2
 
-Plan for upgrading this app from `pydantic-ai` v1 (currently `1.67.0`, pinned `>=1.38.0`) to v2 (`2.2.0` as of this writing).
+Plan for upgrading this app from `pydantic-ai` v1 (currently `1.107.5`, pinned `>=1.106.0,<2`) to v2 (`2.2.0` as of this writing).
+
+The `<2` cap is deliberate: a lockfile refresh would otherwise pull v2 in as an incidental transitive bump, ahead of the code changes below. Lifting the cap is step one of this migration.
 
 ## Context
 
