@@ -63,30 +63,23 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT SELECT ON TABLES TO app_readonly;
 ```
 
-### Step 6 — Row Level Security note
+### Step 6 — Row Level Security
 
-If RLS is ever enabled on either table, a SELECT grant alone is not enough — Supabase will return zero rows without a matching policy. Add a policy for `app_readonly`:
+**RLS is enabled on all six tables** — see [supabase-rls.md](supabase-rls.md) for why and how.
+Two consequences for the roles on this page, both of which bite silently:
 
-```sql
--- Only needed if RLS is enabled on the table
-CREATE POLICY "app_readonly_select" ON kev_vulnerabilities
-  FOR SELECT TO app_readonly USING (true);
+- A `GRANT` alone is no longer enough. RLS applies to every role except the table owner, and
+  neither role here is the owner, so without a matching policy `app_readonly` reads return **zero
+  rows** and `app_etl` upserts fail — with no connection-time error to point at the cause. The
+  `app_roles_rw` policy created by `RLS_SQL` ([rag/database.py](../rag/database.py)) is what keeps
+  both working.
+- **Create these roles before applying `RLS_SQL`.** Its policy creation is guarded on the roles
+  existing, so applying it to a database where they do not yet exist enables RLS and creates no
+  policies — locking out both roles the moment they are added.
 
-CREATE POLICY "app_readonly_select" ON nvd_vulnerabilities
-  FOR SELECT TO app_readonly USING (true);
-
-CREATE POLICY "app_readonly_select" ON cwe_definitions
-  FOR SELECT TO app_readonly USING (true);
-
-CREATE POLICY "app_etl_write" ON kev_vulnerabilities
-  FOR ALL TO app_etl USING (true) WITH CHECK (true);
-
-CREATE POLICY "app_etl_write" ON nvd_vulnerabilities
-  FOR ALL TO app_etl USING (true) WITH CHECK (true);
-
-CREATE POLICY "app_etl_write" ON cwe_definitions
-  FOR ALL TO app_etl USING (true) WITH CHECK (true);
-```
+The policy grants nothing on its own: a policy filters rows, it never confers a privilege. Every
+restriction below — `app_readonly` cannot write vulnerability data, `app_etl` cannot `DELETE` —
+is enforced by the `GRANT`s and is unaffected.
 
 ### Step 6.5 — Grant write on `user_usage` (rate limiting)
 
@@ -125,11 +118,9 @@ GRANT USAGE, SELECT ON SEQUENCE user_usage_id_seq TO app_readonly;
 > No `DELETE` is granted — rows are only ever inserted or incremented. `app_etl`
 > needs no access to `user_usage`; the ETL job never reads or writes it.
 
-> **If RLS is enabled** on `user_usage`, add a policy so the app can write its rows:
-> ```sql
-> CREATE POLICY "app_readonly_usage" ON user_usage
->   FOR ALL TO app_readonly USING (true) WITH CHECK (true);
-> ```
+> `user_usage` carries RLS like the rest (Step 6). The `app_roles_rw` policy is
+> `FOR ALL`, which is what the rate limiter's `INSERT ... ON CONFLICT DO UPDATE`
+> needs — that statement is checked against both the INSERT and UPDATE paths.
 
 ---
 

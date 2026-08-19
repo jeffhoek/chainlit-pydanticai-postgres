@@ -17,7 +17,7 @@ A RAG chatbot built with Pydantic AI and Chainlit that indexes CISA KEV and NIST
 - [Container hardening pen test](docs/container-hardening.md)
 - [NetworkPolicy pen test](docs/network-hardening.md), [egress](docs/egress-hardening.md)
 - [Observability (Langfuse + Logfire)](docs/observability.md)
-- [Supabase RBAC](docs/supabase-readonly-role.md)
+- [Supabase RBAC](docs/supabase-readonly-role.md), [Row-Level Security](docs/supabase-rls.md)
 - [MCP server](docs/mcp-server.md)
 - [Competitive analysis](plans/competitive-analysis.md)
 - [Future enhancements](plans/future-enhancements.md)

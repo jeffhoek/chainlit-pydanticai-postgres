@@ -13,6 +13,7 @@
 | [action-buttons.md](action-buttons.md) | Configure Chainlit action buttons on the welcome message for quick-access suggested questions |
 | [observability.md](observability.md) | Observability integrations — self-hosted Langfuse (Compose) and cloud-hosted Logfire |
 | [supabase-readonly-role.md](supabase-readonly-role.md) | Role-based access control in Supabase — `app_readonly` (SELECT only) for the live app, `app_etl` for ETL scripts |
+| [supabase-rls.md](supabase-rls.md) | Row-Level Security — closing the `rls_disabled_in_public` advisor finding without locking the app roles out of their own tables |
 | [deploy-azure-app-service.md](deploy-azure-app-service.md) | Deploy to Azure App Service as a Linux container, using ACR, Key Vault, and Azure Pipelines with Workload Identity Federation — includes MCP server setup |
 | [deploy-gcp-cloud-run.md](deploy-gcp-cloud-run.md) | Deploy to Google Cloud Run |
 | [eks-runbook.md](eks-runbook.md) | Deploy to AWS EKS using GitHub Actions CI/CD |
