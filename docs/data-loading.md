@@ -170,6 +170,8 @@ NVD modifies thousands of CVEs per week for routine metadata refreshes (CVSS res
 
 **Bump Supabase compute (RAM, not cores) for the run, scale back down after.** The working set — a large HNSW index plus the heap — doesn't fit the small tiers, so more RAM means fewer IO cache-miss stalls; Large (8 GB) comfortably holds it. Cores don't help: Medium and Large are both 2-core and the ETL is a single stream, so the extra spend on cores buys nothing. Scale back down to your steady-state tier once the sync and rebuild finish.
 
+> **Running this in the cloud instead of a laptop?** These same catch-ups (and the HNSW drop/rebuild + schedule-disable steps) are driven from Azure DevOps via the manual [ETL pipeline](etl-pipeline.md), which starts a long-timeout Container Apps Job — no `caffeinate`, no laptop.
+
 ```sql
 -- 1. Before ETL (run in psql, or the Supabase SQL editor)
 DROP INDEX IF EXISTS nvd_embedding_idx;

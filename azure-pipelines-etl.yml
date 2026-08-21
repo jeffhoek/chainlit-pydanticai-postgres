@@ -1,0 +1,175 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Ad-hoc ETL pipeline — parameterized, manual-dispatch NVD/KEV catch-ups.
+#
+# This does NOT run the ETL on the pipeline agent. It orchestrates: it assembles
+# the run args from the parameters below and starts the MANUAL Container Apps Job
+# (job-vulncopilot-etl-catchup-dev, infra/modules/etl-catchup-job.bicep) with a
+# per-run command/args override, then optionally polls the execution to completion.
+#
+# Why invoke the Container Apps Job instead of running here:
+#   • Secrets (DB DSN, NVD_API_KEY, OPENAI_API_KEY) already live in Key Vault and
+#     are bound to the job's managed identity — nothing sensitive touches the agent.
+#   • The job runs async in Azure Container Apps up to its replicaTimeout (~10h),
+#     so a multi-hour catch-up is not bounded by the agent's 60-minute cap. This is
+#     the whole reason the manual laptop runs needed `caffeinate`.
+#   • The job's identity/egress is already allowlisted on the database; hosted-agent
+#     IPs are not.
+#
+# Trigger from ADO: Pipelines → this pipeline → Run pipeline → set parameters.
+# Secret wiring and the HNSW / collision runbook: docs/etl-pipeline.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+trigger: none # never runs on push — this is a manual/on-demand pipeline only
+pr: none
+
+parameters:
+  - name: mode
+    displayName: ETL run mode
+    type: string
+    default: nvd-incremental
+    values:
+      - nvd-incremental # load_nvd_full.py --incremental (honours 'since' + 'skipEmbeddings')
+      - backfill-embeddings # load_nvd_full.py --backfill-embeddings (fill rows missing embeddings)
+      - backfill-ssvc # load_nvd_full.py --backfill-ssvc (populate SSVC cols from raw_json)
+      - full-refresh-kev-nvd # run_etl.py (NVD full incremental + KEV, with results email)
+      - kev-only # load_kev.py (CISA KEV catalog only)
+
+  - name: since
+    displayName: "since date YYYY-MM-DD (nvd-incremental only; blank = DB high-water mark)"
+    type: string
+    default: " " # ADO needs a non-empty default; trimmed to empty in the script
+
+  - name: skipEmbeddings
+    displayName: "Skip embeddings (nvd-incremental only) — load data fast, backfill later"
+    type: boolean
+    default: false
+
+  - name: waitForCompletion
+    displayName: "Wait for the run to finish and fail the pipeline if it fails"
+    type: boolean
+    default: true
+
+  - name: pollTimeoutMinutes
+    displayName: "Max minutes to wait when 'Wait for completion' is on"
+    type: number
+    default: 600
+
+variables:
+  resourceGroup: rg-vulncopilot-dev
+  azureServiceConnection: azure-vulncopilot
+  catchupJobName: job-vulncopilot-etl-catchup-dev
+  scheduledJobName: job-vulncopilot-etl-dev
+
+stages:
+  - stage: RunEtl
+    displayName: Run ETL catch-up
+    jobs:
+      - job: StartCatchup
+        displayName: Start catch-up job and (optionally) wait
+        pool:
+          vmImage: ubuntu-latest
+        # 'timeoutInMinutes: 0' = no agent-side timeout, so a long wait loop is not
+        # cut off by the default 60-minute job limit. The wait itself is separately
+        # bounded by the pollTimeoutMinutes parameter below.
+        timeoutInMinutes: 0
+        steps:
+          - checkout: none # we call az against an already-deployed job; no repo needed
+
+          - task: AzureCLI@2
+            displayName: "Start ${{ parameters.mode }} on the catch-up job"
+            # Parameters are passed as env values (not interpolated into the script
+            # body) so a free-text 'since' is treated as data, not code.
+            env:
+              MODE: ${{ parameters.mode }}
+              SINCE: ${{ parameters.since }}
+              SKIP_EMBEDDINGS: ${{ parameters.skipEmbeddings }}
+              WAIT: ${{ parameters.waitForCompletion }}
+              POLL_TIMEOUT_MIN: ${{ parameters.pollTimeoutMinutes }}
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                RG="$(resourceGroup)"
+                JOB="$(catchupJobName)"
+                SCHEDULED="$(scheduledJobName)"
+
+                # ── Build the command + args for this mode ─────────────────────
+                CMD="/app/.venv/bin/python"
+                case "$MODE" in
+                  nvd-incremental)
+                    ARGS="scripts/load_nvd_full.py --incremental"
+                    SINCE_TRIMMED="$(echo "$SINCE" | tr -d '[:space:]')"
+                    if [ -n "$SINCE_TRIMMED" ]; then
+                      # Validate strictly — this value is spliced into the job's args.
+                      if ! echo "$SINCE_TRIMMED" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+                        echo "ERROR: 'since' must be YYYY-MM-DD, got: '$SINCE'"; exit 1
+                      fi
+                      ARGS="$ARGS --since $SINCE_TRIMMED"
+                    fi
+                    [ "$SKIP_EMBEDDINGS" = "True" ] && ARGS="$ARGS --skip-embeddings"
+                    ;;
+                  backfill-embeddings) ARGS="scripts/load_nvd_full.py --backfill-embeddings" ;;
+                  backfill-ssvc)       ARGS="scripts/load_nvd_full.py --backfill-ssvc" ;;
+                  full-refresh-kev-nvd) ARGS="scripts/run_etl.py" ;;
+                  kev-only)            ARGS="scripts/load_kev.py" ;;
+                  *) echo "ERROR: unknown mode '$MODE'"; exit 1 ;;
+                esac
+
+                echo "Mode:    $MODE"
+                echo "Command: $CMD $ARGS"
+                echo "Job:     $JOB (rg: $RG)"
+
+                # ── Collision guards ───────────────────────────────────────────
+                # Refuse to start a second catch-up on top of a running one — two
+                # concurrent writers race the incremental high-water mark.
+                RUNNING=$(az containerapp job execution list -n "$JOB" -g "$RG" \
+                  --query "[?properties.status=='Running'].name" -o tsv)
+                if [ -n "$RUNNING" ]; then
+                  echo "ERROR: a catch-up execution is already Running ($RUNNING). Wait for it or stop it first."
+                  exit 1
+                fi
+                # Warn (don't block) if the scheduled job is mid-run — overlapping
+                # incremental writers can collide on the high-water mark. Disable the
+                # schedule for a big catch-up (see docs/etl-pipeline.md).
+                SCHED_RUNNING=$(az containerapp job execution list -n "$SCHEDULED" -g "$RG" \
+                  --query "[?properties.status=='Running'].name" -o tsv 2>/dev/null || true)
+                if [ -n "$SCHED_RUNNING" ]; then
+                  echo "##vso[task.logissue type=warning]Scheduled job $SCHEDULED is Running ($SCHED_RUNNING). Consider disabling its schedule during a large catch-up."
+                fi
+
+                # ── Start the run ──────────────────────────────────────────────
+                # shellcheck disable=SC2086 -- ARGS is intentionally word-split into tokens
+                EXEC=$(az containerapp job start -n "$JOB" -g "$RG" \
+                  --command "$CMD" --args $ARGS \
+                  --query name -o tsv)
+                echo "Started execution: $EXEC"
+                echo "##vso[task.setvariable variable=executionName]$EXEC"
+
+                if [ "$WAIT" != "True" ]; then
+                  echo "waitForCompletion is off — not polling. Track it with:"
+                  echo "  az containerapp job execution show -n $JOB -g $RG --job-execution-name $EXEC --query properties.status -o tsv"
+                  exit 0
+                fi
+
+                # ── Poll to completion ─────────────────────────────────────────
+                DEADLINE=$(( $(date +%s) + POLL_TIMEOUT_MIN * 60 ))
+                INTERVAL=30
+                while :; do
+                  STATUS=$(az containerapp job execution show -n "$JOB" -g "$RG" \
+                    --job-execution-name "$EXEC" --query properties.status -o tsv 2>/dev/null || echo "Unknown")
+                  echo "$(date -u +%H:%M:%S) — $EXEC: $STATUS"
+                  case "$STATUS" in
+                    Succeeded) echo "Run succeeded."; exit 0 ;;
+                    Failed|Cancelled|Degraded)
+                      echo "Run ended: $STATUS. Inspect logs (see docs/etl-pipeline.md § Logs)."
+                      exit 1 ;;
+                  esac
+                  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+                    echo "##vso[task.logissue type=warning]Stopped waiting after ${POLL_TIMEOUT_MIN}m; job is still $STATUS. It continues running in Azure — check its status/logs."
+                    exit 1
+                  fi
+                  sleep "$INTERVAL"
+                done
